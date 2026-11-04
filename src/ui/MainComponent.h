@@ -80,6 +80,9 @@ public:
     // A file the operating system asks LYNX to open while it runs (macOS Finder): as File › Open, unsaved changes are
     // asked about first; waits for a project still loading.
     void openFileRequest (const juce::File& file);
+    // the control socket's select (engine/ControlServer.h)
+    void selectPatternForControl (int index) { selectPattern (index); }
+    void showPianoRollForControl() { openPianoRoll(); }
     void showSetupWizard(); // first run, or Options > Setup wizard (an overlay over this component)
     void closeSetupWizardForSnapshot() { setupOverlay.reset(); }
     void refreshTweakReadoutForSnapshot() { refreshTweakReadout(); resized(); }

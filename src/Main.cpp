@@ -33,6 +33,7 @@
 #include "core/FlWrapper.h"
 #include "engine/AudioEngine.h"
 #include "engine/PreviewPlayer.h"
+#include "engine/ControlServer.h"
 #include "engine/Metronome.h"
 #include "engine/AudioLogger.h"
 #include "engine/DllAsioDevice.h"
@@ -2179,6 +2180,32 @@ public:
         lynx::applyRenderingChoice (*mainWindow); // (GPU rendering off: GDI; round 157a)
         lynx::startRenderingWatch();
         startupTrace.mark ("main window built");
+        startControlServer();
+    }
+
+    // --control <socket path>: a local JSON-RPC socket for an MCP server (engine/ControlServer.h)
+    void startControlServer()
+    {
+        const auto args = getCommandLineParameterArray();
+        const auto i = args.indexOf ("--control");
+        if (i < 0 || control != nullptr || engine == nullptr || mainWindow == nullptr)
+            return;
+        const auto path = i + 1 < args.size() ? args[i + 1].unquoted() : juce::String ("/tmp/lynx.sock");
+        auto* ui = &mainWindow->getContent();
+        lynx::ControlServer::Hooks hooks;
+        hooks.selectPattern = [ui] (int index) { ui->selectPatternForControl (index); };
+        hooks.showPianoRoll = [ui] { ui->showPianoRollForControl(); };
+        control = std::make_unique<lynx::ControlServer> (*engine, path, std::move (hooks));
+        juce::String error;
+        if (! control->start (error))
+        {
+            std::fprintf (stderr, "LYNX: control socket %s: %s\n", path.toRawUTF8(), error.toRawUTF8());
+            control = nullptr;
+        }
+        else
+        {
+            std::fprintf (stderr, "LYNX: control socket listening on %s\n", path.toRawUTF8());
+        }
     }
 
     // the previous run ended without closing (see collectUncleanSessions): say so once, with its last step — and, as
@@ -2410,6 +2437,7 @@ public:
         lynx::shutdownAudioToMidi();    // (the same for a conversion to MIDI)
         if (mainWindow != nullptr && mainWindow->isVisible())
             mainWindow->saveState();
+        control = nullptr; // (the control socket uses the UI and the engine)
         mainWindow = nullptr; // the UI goes before the engine
         lynx::updater::shutdown(); // (a check or download in flight stops)
         crashEngine = nullptr;
@@ -16252,6 +16280,7 @@ private:
 
     lynx::theme::LookAndFeel lookAndFeel;
     std::unique_ptr<lynx::AudioEngine> engine;
+    std::unique_ptr<lynx::ControlServer> control; // --control
     std::unique_ptr<juce::XmlElement> savedDeviceState; // --rtstress: the user's device before this run's --type/--buffer
 
     // Hidden test mode --asiodll "<driver.dll>[|{CLSID}]" (REA round 97): an ASIO driver loaded straight from its file,

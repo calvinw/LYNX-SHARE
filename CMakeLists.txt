@@ -425,6 +425,7 @@ if(LYNX_BUILD_APP)
         src/engine/LiveLink.cpp
         src/engine/LiveSessions.cpp
         src/engine/MediaPack.cpp
+        src/engine/ControlServer.cpp
         src/engine/LiveTest.cpp
         src/engine/DeviceChangeTest.cpp
         src/engine/ShortExportTest.cpp
