@@ -312,6 +312,13 @@ juce::var applyOp (AudioEngine& engine, Song& s, const juce::var& op, std::vecto
         s.removePattern (patternIndex (s, idArg (op, "pattern")));
         return {};
     }
+    if (name == "set_pattern")
+    {
+        auto& p = s.patterns[(std::size_t) patternIndex (s, idArg (op, "pattern"))];
+        if (has (op, "name"))
+            p.name = op["name"].toString().toStdString();
+        return {};
+    }
     if (name == "set_notes" || name == "add_notes")
     {
         auto& p = s.patterns[(std::size_t) patternIndex (s, idArg (op, "pattern"))];
