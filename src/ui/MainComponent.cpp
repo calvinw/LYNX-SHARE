@@ -8087,6 +8087,31 @@ void MainComponent::exportMidiFile()
                               });
 }
 
+void MainComponent::newProjectForRemote (const juce::File& file) { startNewProject (makeNewProject(), file); }
+
+juce::File MainComponent::saveForRemote (juce::File file)
+{
+    if (file == juce::File())
+    {
+        if (currentFile == juce::File() || currentFile.isAChildOf (autosaveFolder()))
+            throw std::runtime_error ("This project has no file yet; give a path to save it");
+        file = currentFile;
+    }
+    file = ProjectFile::withProjectExtension (file);
+    juce::String error;
+    engine.capturePluginStates();
+    keepOverwrittenCopy (file);
+    if (! ProjectFile::save (engine.getSong(), file, error))
+        throw std::runtime_error (error.toStdString());
+    engine.markSaved();
+    rememberRecent (file);
+    currentFile = file;
+    projectName = file.getFileNameWithoutExtension();
+    importedSuffix = {};
+    updateTitle();
+    return file;
+}
+
 void MainComponent::save (bool askForFile, std::function<void()> afterSaved)
 {
     commitSongNotes(); // (round 190ch: notes still being typed are part of what is saved)
