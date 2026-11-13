@@ -88,6 +88,29 @@ bool boolean (const juce::var& args, const char* field)
     return (bool) args[field];
 }
 
+void fields (const juce::var& args, std::initializer_list<const char*> allowed)
+{
+    if (args.isVoid()) return;
+    auto* properties = args.getDynamicObject();
+    if (properties == nullptr) invalid ("args must be an object");
+    for (const auto& property : properties->getProperties())
+        if (std::none_of (allowed.begin(), allowed.end(), [&] (const char* name) { return property.name.toString() == name; }))
+            invalid ("Unknown field: " + property.name.toString());
+}
+
+juce::String string (const juce::var& args, const char* field)
+{
+    if (! args[field].isString())
+        invalid (juce::String (field) + " must be a string");
+    return args[field].toString();
+}
+
+RemoteControl::UiHooks& uiHooks()
+{
+    static RemoteControl::UiHooks hooks;
+    return hooks;
+}
+
 int indexFor (const juce::var& args, std::size_t size)
 {
     if (size == 0)
@@ -259,7 +282,7 @@ struct RemoteControl::Impl final : juce::Thread
                 return object ({ { "protocol", protocol }, { "apiVersion", 1 }, { "projectFormat", "lynx-json/1" },
                     { "maxRequestBytes", (int) maxMessage }, { "maxResponseBytes", (int) maxMessage },
                     { "authentication", "hmac-sha256-mutual" }, { "capabilities", status()["capabilities"] },
-                    { "operations", juce::var (juce::StringArray { "api.describe", "status", "changes", "session.inspect", "device.state", "project.read", "project.edit", "pattern.create", "pattern.clone", "pattern.set", "pattern.notes", "plugin.inspect", "effect.catalog", "instrument.catalog", "playlist.inspect", "tempo.set", "mixer.set", "channel.set", "channel.create", "instrument.replace", "pattern.replace_notes", "plugin.parameters_set", "effect.load", "effect.remove", "playlist.edit", "transport.play", "transport.stop", "history.undo", "history.redo" }) } });
+                    { "operations", juce::var (juce::StringArray { "api.describe", "status", "changes", "session.inspect", "device.state", "project.read", "project.edit", "pattern.create", "pattern.clone", "pattern.set", "pattern.notes", "plugin.inspect", "effect.catalog", "instrument.catalog", "playlist.inspect", "tempo.set", "mixer.set", "channel.set", "channel.create", "instrument.replace", "pattern.replace_notes", "plugin.parameters_set", "effect.load", "effect.remove", "playlist.edit", "transport.play", "transport.stop", "transport.pause", "ui.select", "project.save", "project.new", "history.undo", "history.redo" }) } });
             if (op == "project.read") return projectControl.dispatch (op, args, cancelled);
             if (op == "session.inspect")
                 return inspect();
@@ -291,6 +314,77 @@ struct RemoteControl::Impl final : juce::Thread
             {
                 engine.stop();
                 return object ({ { "playing", false } });
+            }
+
+            // Pause = stop and stay where playback was. Like stop, it needs no revision guard.
+            if (op == "transport.pause")
+            {
+                fields (args, {});
+                const auto at = engine.getTransport().positionTicks.load();
+                engine.stop();
+                engine.seek (at);
+                return object ({ { "playing", false }, { "positionTicks", at } });
+            }
+            // View state, not project data: no undo step, no guard.
+            if (op == "ui.select")
+            {
+                fields (args, { "pattern", "channel", "pianoRoll" });
+                const auto& hooks = uiHooks();
+                if (args.hasProperty ("pattern"))
+                {
+                    const auto pattern = (int) integer (args, "pattern", 0, (juce::int64) s.patterns.size() - 1);
+                    if (hooks.selectPattern) hooks.selectPattern (pattern);
+                    else engine.editSong ([pattern] (Song& song) { song.currentPattern = pattern; }, false);
+                }
+                if (args.hasProperty ("channel"))
+                    engine.setSelectedChannel ((int) integer (args, "channel", 0, (juce::int64) engine.getSong().channels.size() - 1));
+                if (args.hasProperty ("pianoRoll") && boolean (args, "pianoRoll"))
+                {
+                    if (! hooks.showPianoRoll) invalid ("The piano roll cannot be opened from here");
+                    hooks.showPianoRoll();
+                }
+                return object ({ { "currentPattern", engine.getSong().currentPattern } });
+            }
+            // A fresh default project. Refused while the open one has unsaved changes, so nothing is ever lost.
+            if (op == "project.new")
+            {
+                fields (args, { "path" });
+                const auto& hooks = uiHooks();
+                if (! hooks.newProject) invalid ("Starting a new project is unavailable");
+                if (engine.isModified()) throw RemoteError ("busy", "The open project has unsaved changes; save it first");
+                juce::File file;
+                if (args.hasProperty ("path"))
+                {
+                    const auto path = string (args, "path");
+                    if (! juce::File::isAbsolutePath (path)) invalid ("path must be absolute");
+                    file = juce::File (path);
+                    if (! file.hasFileExtension (".lynx")) file = file.withFileExtension (".lynx");
+                    if (file.exists()) invalid ("A file already exists at that path");
+                }
+                hooks.newProject (file);
+                observe ("project.new");
+                return object ({ { "path", file.getFullPathName() }, { "projectId", juce::String (engine.getSong().projectId) } });
+            }
+            if (op == "project.save")
+            {
+                fields (args, { "path" });
+                const auto& hooks = uiHooks();
+                if (! hooks.save) invalid ("Saving is unavailable");
+                juce::File file;
+                if (args.hasProperty ("path"))
+                {
+                    const auto path = string (args, "path");
+                    if (! juce::File::isAbsolutePath (path)) invalid ("path must be absolute");
+                    file = juce::File (path);
+                }
+                try
+                {
+                    return object ({ { "path", hooks.save (file).getFullPathName() } });
+                }
+                catch (const std::runtime_error& e)
+                {
+                    throw RemoteError ("failed", e.what());
+                }
             }
 
             if (op != "transport.play" && op != "transport.stop" && op != "tempo.set" && op != "mixer.set"
@@ -329,6 +423,18 @@ struct RemoteControl::Impl final : juce::Thread
 
             if (op == "transport.play")
             {
+                fields (args, { "mode", "pattern", "fromTicks", "expectedProjectId", "expectedRevision", "expectedEpoch" });
+                // Optional: switch Song/Pattern mode and the current pattern (view state, no undo step), and seek.
+                const auto mode = args.hasProperty ("mode") ? string (args, "mode") : juce::String();
+                if (mode.isNotEmpty() && mode != "song" && mode != "pattern") invalid ("mode must be song or pattern");
+                const auto pattern = args.hasProperty ("pattern") ? (int) integer (args, "pattern", 0, (juce::int64) s.patterns.size() - 1) : -1;
+                if (mode.isNotEmpty() || pattern >= 0)
+                    engine.editSong ([&] (Song& song) {
+                        if (mode.isNotEmpty()) song.mode = mode == "song" ? PlayMode::song : PlayMode::pattern;
+                        if (pattern >= 0) song.currentPattern = pattern;
+                    }, false);
+                if (args.hasProperty ("fromTicks"))
+                    engine.seek ((double) integer (args, "fromTicks", 0, maxTick));
                 engine.startPlayback();
                 return object ({ { "playing", engine.getTransport().playing.load() } });
             }
@@ -646,6 +752,8 @@ struct RemoteControl::Impl final : juce::Thread
     juce::File discovery;
     juce::String token;
 };
+
+void RemoteControl::setUiHooks (UiHooks hooks) { uiHooks() = std::move (hooks); }
 
 RemoteControl::RemoteControl (std::unique_ptr<Impl> value) : impl (std::move (value)) {}
 RemoteControl::~RemoteControl() = default;

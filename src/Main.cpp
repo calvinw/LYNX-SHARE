@@ -1874,6 +1874,14 @@ public:
         lynx::applyRenderingChoice (*mainWindow); // (GPU rendering off: GDI; round 157a)
         lynx::startRenderingWatch();
         startupTrace.mark ("main window built");
+        lynx::RemoteControl::setUiHooks ({
+            [this] (int pattern) { if (mainWindow != nullptr) mainWindow->getContent().selectPatternForRemote (pattern); },
+            [this] { if (mainWindow != nullptr) mainWindow->getContent().showPianoRollForRemote(); },
+            [this] (const juce::File& file) {
+                if (mainWindow == nullptr) throw std::runtime_error ("No window");
+                return mainWindow->getContent().saveForRemote (file);
+            },
+            [this] (const juce::File& file) { if (mainWindow != nullptr) mainWindow->getContent().newProjectForRemote (file); } });
         lynx::remoteui::install ([this] (bool enabled) {
             remoteControl = nullptr;
             if (enabled)

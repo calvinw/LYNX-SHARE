@@ -76,6 +76,11 @@ public:
     void openFileRequest (const juce::File& file);
     // The document currently saved/opened, empty for an unsaved or imported song.
     juce::File getCurrentProjectFile() const { return currentFile; }
+    // Remote Control's ui.select and project.save (engine/RemoteControl.h)
+    void selectPatternForRemote (int index) { selectPattern (index); }
+    void showPianoRollForRemote() { openPianoRoll(); }
+    juce::File saveForRemote (juce::File file); // empty = the current document; throws std::runtime_error
+    void newProjectForRemote (const juce::File& file);
     void showSetupWizard(); // first run, or Options > Setup wizard (an overlay over this component)
     void closeSetupWizardForSnapshot() { setupOverlay.reset(); }
     void refreshTweakReadoutForSnapshot() { refreshTweakReadout(); resized(); }
