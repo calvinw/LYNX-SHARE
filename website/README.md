@@ -96,6 +96,62 @@ the earlier pepper in the logo button of a plugin's header: `scripts/site-shots.
 repainted that button with the mark (without the tile, on a dark disc, as the program draws it from 0.1.27). At the
 next release, whose program draws the new logo itself, run `site-shots.py` again WITHOUT `--logo-was` so nothing is painted.
 
+**Hero, social preview, poster, Store.** `site-shots.py` takes the hero (`assets/img/hero.webp`), the README's
+`docs/img/workspace.png`, Store screenshot `01-workspace.png` and `assets/media/poster.jpg` from `snap/s-desktop-all.png`
+(the demo song with the Channel Rack, Piano Roll, Playlist and Mixer open, as the hero's alt text says; `s-desktop.png`
+is the plain start-up layout). It also writes Store screenshots 02-04 and the GitHub social preview
+`docs/img/social-preview.png`, which `scripts/social-preview.py` draws whole: its words are the `TEXT` table at the top
+of that script (name, formats opened and exported, plugin formats, platforms, repository URL). Change them there and
+run it again, never edit the picture; keep them in line with the README. The preview is uploaded by hand in the
+repository's Settings > Social preview.
+
+## 0.1.27 release: what the texts do not cover yet
+
+Branch wip/rel190eu (round 190eu) has the 0.1.27 Updates entry and the page texts (features, fixes, why, home, FAQ,
+six wiki pages) in 15 languages. Not done there, for the release:
+
+- **Date**: `_src/updates.json` has the placeholder `"date": "2026-11-14"` on the 0.1.27 entry: set the release day,
+  build, check.
+- **Pictures**: everything in the 0.1.26 list below that is still open, from the 0.1.27 build. New features the pages
+  now describe without a picture: the Session mixer and Drum Rack (Clip-launch), the Simple track dock and the
+  first-song tour, Remote control settings, the Sampler page in FL's layout, Edison on a mixer slot.
+- **demo.mp3 / peaks.json**: done (round 190fd): rendered from the 0.1.27 RC2 `Demo.lynx` (`LYNX.exe --export`,
+  then 160 kb/s MP3): 50 s, -13.0 LUFS, -1.0 dBTP; `peaks.json` = 600 max-abs bars of that MP3; `?v=0.1.27`.
+- **Catalogue** (`_src/catalog.json`, 205 entries): branch wip/site190ex (round 190ex) has the 12 entries new in
+  0.1.27, each with its wiki page and 14 translations, and the wiki tables of the 16 editors that changed (the Law:
+  Classic | Measured switch on Epoch Verb, Atrium, Foil Plate, Halo, Horizon, Nebula, Orbit, Spiral Echo, Lattice Mod,
+  Echoform (+ Clock), Gemini Doubler (Head law), Voice Shift, Quell (+ Matched); Sentry Trigger / Release shape /
+  Sensitivity; Hush Air / Mix; Glow Opto memory). The new entries have no picture yet (name plate); each `img` names
+  the render `LYNX.exe --pluginthumbs R\thumbs` writes, so at the release: draw the thumbs with the 0.1.27 build, run
+  `import-shots.py R`, build. Expected files:
+
+  | Plugin | Render in `R/thumbs/` | Picture the import writes |
+  |---|---|---|
+  | `Pocket EQ` | `fx-pocket-eq-e381890e.png` | `assets/img/plugins/fx-pocket-eq.webp` |
+  | `Pocket Graphic EQ` | `fx-pocket-graphic-eq-94da1872.png` | `assets/img/plugins/fx-pocket-graphic-eq.webp` |
+  | `Pocket Filter` | `fx-pocket-filter-5341844e.png` | `assets/img/plugins/fx-pocket-filter.webp` |
+  | `Pocket Comb Filter` | `fx-pocket-comb-filter-74ccea05.png` | `assets/img/plugins/fx-pocket-comb-filter.webp` |
+  | `Pocket Reverb Classic` | `fx-pocket-reverb-classic-e47dfa68.png` | `assets/img/plugins/fx-pocket-reverb-classic.webp` |
+  | `Pocket Reverb 2` | `fx-pocket-reverb-2-616cce9e.png` | `assets/img/plugins/fx-pocket-reverb-2.webp` |
+  | `Pocket Reverb` | `fx-pocket-reverb-de000728.png` | `assets/img/plugins/fx-pocket-reverb.webp` |
+  | `Pocket Multiband Compressor` | `fx-pocket-multiband-compressor-0166a4bb.png` | `assets/img/plugins/fx-pocket-multiband-compressor.webp` |
+  | `Pocket Tape Stop` | `fx-pocket-tape-stop-052705cc.png` | `assets/img/plugins/fx-pocket-tape-stop.webp` |
+  | `Pocket SuperSaw` | `gen-pocket-supersaw-f93c6894.png` | `assets/img/plugins/gen-pocket-supersaw.webp` |
+  | `Edison` | `fx-edison-95160c7e.png` | `assets/img/plugins/fx-edison.webp` |
+  | `Drum Rack` | `gen-drum-rack-a4ce4351.png` | `assets/img/plugins/gen-drum-rack.webp` |
+
+  The changed editors keep their 0.1.25 / 0.1.26 `art/<name>-after-100.png` pictures, which do not show the new
+  switches: draw them again with `--artshot` from the 0.1.27 build (Epoch Verb, Atrium, Foil Plate, Halo, Horizon,
+  Nebula, Orbit, Spiral Echo, Lattice Mod, Gemini Doubler, Echoform, Voice Shift, Quell Denoiser, Sentry Gate, Hush
+  De-esser, Glow Leveler).
+- **Wiki**: updated for 0.1.27 on wip/site190ex (English + 14 languages, line for line): Mixer, Playlist, Piano
+  roll, MIDI controllers, Recording, Layouts. Pictures those pages would gain (not referenced yet, so nothing is
+  broken without them; add the `![...]` line to the English page and the same line to the 14 bodies):
+  `assets/img/wiki/mixer-edison-slot.webp` (Edison open from a mixer slot), `playlist-audio-clip-menu.webp`,
+  `playlist-point-modes.webp` (an automation point's Mode list), `pianoroll-limit.webp` (the Limit dialog),
+  `remote-control-settings.webp`, `map-mode.webp` (the clip grid in MIDI Map Mode with the mapping list),
+  `session-mixer.webp`, `track-dock.webp` (the Simple workflow's Effects tab), `one-click-record.webp`.
+
 ## 0.1.26 release: pictures and catalogue still to do (texts are ready)
 
 The 0.1.26 texts are in the page sources; every picture is still from 0.1.25. No picture was added or changed for

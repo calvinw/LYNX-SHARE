@@ -1,9 +1,11 @@
 #include "ui/NativeChild.h"
 #include "ui/WindowOwner.h"
+#include "core/DockStack.h"
 
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <utility>
 #include <vector>
 
 #if JUCE_WINDOWS
@@ -242,32 +244,51 @@ private:
 };
 
 #if JUCE_WINDOWS
-// Round 190cj: a transparent child window (a dancer) takes the mouse wherever its picture is not fully transparent:
-// the system decides that from the pixels, before JUCE's hitTest is asked, and a click JUCE then finds no component
-// for is simply lost. So the window answers the system's own hit test: where the component's hitTest says no (FL's
-// "Solid" off, the dancer's arms and reflection) it is "transparent", and the click goes to the window under it.
-struct ClickThrough
+// Every attached child window goes through one window procedure in front of JUCE's (one per window, so the original is
+// put back in the right order when the window goes):
+// - Round 190cj: a transparent child window (a dancer) takes the mouse wherever its picture is not fully transparent:
+//   the system decides that from the pixels, before JUCE's hitTest is asked, and a click JUCE then finds no component
+//   for is simply lost. So the window answers the system's own hit test: where the component's hitTest says no (FL's
+//   "Solid" off, the dancer's arms and reflection) it is "transparent", and the click goes to the window under it.
+// - Issue #161: JUCE answers WM_MOUSEACTIVATE from the clicked window's own component, and a panel (the Playlist, the
+//   Piano roll...) does not take the keyboard focus on a click, so JUCE said "don't activate": back from another app,
+//   a click in a panel left LYNX's main window inactive and Space went nowhere. clickActivatesWindow() decides it.
+struct Subclassed
 {
     WNDPROC original = nullptr;
     juce::Component::SafePointer<juce::Component> component;
+    bool clickThrough = false;
+    bool focusAfterActivation = false; // (activated by this click: the main window gets the system focus at its button-down)
 };
 
-std::map<HWND, ClickThrough>& clickThroughWindows()
+std::map<HWND, Subclassed>& subclassedWindows()
 {
-    static std::map<HWND, ClickThrough> windows;
+    static std::map<HWND, Subclassed> windows;
     return windows;
 }
 
-LRESULT CALLBACK clickThroughProc (HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+bool pretendInactive = false; // (tests: the window answers as when LYNX is in the background)
+
+// the top-level window the child belongs to is the foreground window (the active one of the active app)
+bool rootIsForeground (HWND hwnd)
 {
-    auto& windows = clickThroughWindows();
+    if (pretendInactive)
+        return false;
+    auto* root = GetAncestor (hwnd, GA_ROOT);
+    return root != nullptr && GetForegroundWindow() == root;
+}
+
+LRESULT CALLBACK childProc (HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    auto& windows = subclassedWindows();
     const auto it = windows.find (hwnd);
     if (it == windows.end())
         return DefWindowProc (hwnd, message, wParam, lParam);
     const auto original = it->second.original;
-    if (message == WM_NCHITTEST)
+    auto* c = it->second.component.getComponent();
+    if (message == WM_NCHITTEST && it->second.clickThrough)
     {
-        if (auto* c = it->second.component.getComponent())
+        if (c != nullptr)
             if (auto* peer = c->getPeer())
             {
                 POINT p { (int) (short) LOWORD (lParam), (int) (short) HIWORD (lParam) };
@@ -277,6 +298,23 @@ LRESULT CALLBACK clickThroughProc (HWND hwnd, UINT message, WPARAM wParam, LPARA
                     return HTTRANSPARENT;
             }
     }
+    else if ((message == WM_MOUSEACTIVATE || message == WM_POINTERACTIVATE) && c != nullptr
+             && ! c->getMouseClickGrabsKeyboardFocus() && clickActivatesWindow (*c, rootIsForeground (hwnd)))
+    {
+        it->second.focusAfterActivation = true;
+        return MA_ACTIVATE; // (the system activates the main window; JUCE would have said MA_NOACTIVATE)
+    }
+    else if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN
+             || message == WM_POINTERDOWN)
+    {
+        // the main window is active now; the system normally gave it the focus too (JUCE then hands it back to the
+        // control that had it, or the main window takes it: MainComponent::shouldReclaimKeyboardFocus). If nothing in it
+        // has the focus, the keys would only reach it as "system" keys: the focus goes to the main window itself.
+        if (std::exchange (it->second.focusAfterActivation, false))
+            if (auto* root = GetAncestor (hwnd, GA_ROOT); root != nullptr && GetForegroundWindow() == root)
+                if (auto* focus = GetFocus(); focus == nullptr || GetAncestor (focus, GA_ROOT) != root)
+                    SetFocus (root);
+    }
     else if (message == WM_NCDESTROY)
     {
         SetWindowLongPtr (hwnd, GWLP_WNDPROC, (LONG_PTR) original);
@@ -285,20 +323,142 @@ LRESULT CALLBACK clickThroughProc (HWND hwnd, UINT message, WPARAM wParam, LPARA
     return CallWindowProc (original, hwnd, message, wParam, lParam);
 }
 
-void passMissedClicksThrough (juce::Component& c)
+void subclass (juce::Component& c, bool clickThrough)
 {
     auto* hwnd = static_cast<HWND> (c.getWindowHandle());
-    if (hwnd == nullptr || clickThroughWindows().count (hwnd) != 0)
+    if (hwnd == nullptr)
         return;
-    auto& entry = clickThroughWindows()[hwnd];
+    auto& windows = subclassedWindows();
+    if (const auto it = windows.find (hwnd); it != windows.end())
+    {
+        it->second.component = &c;
+        it->second.clickThrough = it->second.clickThrough || clickThrough;
+        return;
+    }
+    auto& entry = windows[hwnd];
     entry.component = &c;
-    entry.original = (WNDPROC) SetWindowLongPtr (hwnd, GWLP_WNDPROC, (LONG_PTR) clickThroughProc);
+    entry.clickThrough = clickThrough;
+    entry.original = (WNDPROC) SetWindowLongPtr (hwnd, GWLP_WNDPROC, (LONG_PTR) childProc);
+}
+#endif
+
+#if JUCE_WINDOWS
+// Round 190ev (issue #152): the attached components that come in front on any click inside them, and what runs then.
+struct ClickRaise
+{
+    juce::Component::SafePointer<juce::Component> component;
+    std::function<void()> onClick;
+};
+
+std::vector<ClickRaise>& clickRaises()
+{
+    static std::vector<ClickRaise> list;
+    return list;
+}
+
+bool staysInFront (const juce::Component* c)
+{
+    if (c == nullptr || ! c->isVisible())
+        return true; // (a hidden sibling covers nothing)
+    for (auto* list : { &floaters(), &overlays() })
+        for (const auto& o : *list)
+            if (o.getComponent() == c)
+                return true;
+    return false;
+}
+
+void raiseClicked (juce::Component::SafePointer<juce::Component> safe)
+{
+    auto* c = safe.getComponent();
+    if (c == nullptr || ! isAttached (*c) || ! c->isVisible())
+        return;
+    const auto parent = (void*) (juce::pointer_sized_int) (juce::int64) c->getProperties().getWithDefault ("lynxNativeParent", (juce::int64) 0);
+    const auto siblings = attachedChildrenOf (parent);
+    if (dockstack::needsRaise (siblings, c, [] (juce::Component* w) { return staysInFront (w); }))
+    {
+        c->toFront (false);
+        raiseOverlays();
+    }
+    for (const auto& r : clickRaises())
+        if (r.component == safe && r.onClick != nullptr)
+        {
+            auto run = r.onClick; // (it may close the window and change the list)
+            run();
+            break;
+        }
+}
+
+// A button pressed anywhere in the UI thread's windows: when it lands in a native window INSIDE a registered attached
+// component (a window of a plugin's own view), that component comes in front (after this message: the hook does not
+// move windows itself). A click on the component's own native window goes through JUCE (its mouse listeners).
+LRESULT CALLBACK clickHookProc (int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code == HC_ACTION && wParam == PM_REMOVE && lParam != 0)
+    {
+        const auto* msg = reinterpret_cast<const MSG*> (lParam);
+        switch (msg->message)
+        {
+            case WM_LBUTTONDOWN:
+            case WM_RBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+            case WM_XBUTTONDOWN:
+            case WM_NCLBUTTONDOWN:
+            case WM_NCRBUTTONDOWN:
+            {
+                auto& list = clickRaises();
+                std::erase_if (list, [] (const ClickRaise& r) { return r.component == nullptr; });
+                if (list.empty() || msg->hwnd == nullptr)
+                    break;
+                std::vector<HWND> ancestry;
+                for (auto h = msg->hwnd; h != nullptr && ancestry.size() < 24; h = GetAncestor (h, GA_PARENT))
+                    ancestry.push_back (h);
+                const auto at = dockstack::clickedWindow (ancestry, [&list] (HWND h) {
+                    return std::any_of (list.begin(), list.end(), [h] (const ClickRaise& r) { return r.component->getWindowHandle() == (void*) h; });
+                });
+                if (at <= 0) // (none, or the component's own window: JUCE's mouse listeners take it)
+                    break;
+                for (const auto& r : list)
+                    if (r.component->getWindowHandle() == (void*) ancestry[(std::size_t) at])
+                    {
+                        juce::MessageManager::callAsync ([safe = r.component] { raiseClicked (safe); });
+                        break;
+                    }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    return CallNextHookEx (nullptr, code, wParam, lParam);
+}
+
+void installClickHook()
+{
+    static HHOOK hook = nullptr;
+    if (hook == nullptr)
+        hook = SetWindowsHookExW (WH_GETMESSAGE, clickHookProc, nullptr, GetCurrentThreadId());
 }
 #endif
 
 struct KeyForwarder final : juce::KeyListener
 {
     bool keyPressed (const juce::KeyPress& key, juce::Component*) override { return runSecondaryWindowKey (key); }
+
+    // Round 190fc (0.1.27 RC H2): a key-down that nothing in an attached window used is posted on to the parent window by
+    // JUCE (HWNDComponentPeer: WM_KEYDOWN -> doKeyDown false -> forwardMessageToParent). The main window's peer then
+    // finds no WM_CHAR of its own and makes a key press of it for the focused component, which is still the one in this
+    // window: its keys reached the shortcuts twice, so Space played and stopped at once ("Space does nothing" after a
+    // click on a control of the Simple dock or title bar). The key press itself still comes here (the WM_CHAR, or
+    // JUCE's own for keys without a character) and keyPressed forwards it once, so the key-down is taken as used.
+    bool keyStateChanged (bool isKeyDown, juce::Component* origin) override
+    {
+       #if JUCE_WINDOWS
+        return isKeyDown && origin != nullptr && isAttached (*origin);
+       #else
+        juce::ignoreUnused (isKeyDown, origin);
+        return false;
+       #endif
+    }
 };
 
 KeyForwarder& keyForwarder()
@@ -314,7 +474,7 @@ bool dockingEnabled()
     return on;
 }
 
-bool attach (juce::Component& c, juce::Component& area)
+bool attach (juce::Component& c, juce::Component& area, int styleFlags)
 {
     if (isAttached (c))
         return true;
@@ -322,13 +482,16 @@ bool attach (juce::Component& c, juce::Component& area)
     if (handle == nullptr || c.getParentComponent() != nullptr)
         return false;
     const auto bounds = c.getBounds();
-    // no title bar, no taskbar entry, no shadow: a plain child window the system clips to the main window
-    c.addToDesktop (0, handle);
+    // no title bar, no taskbar entry, no shadow: a plain child window the system clips to the main window. (Round 190ev:
+    // a docked LYNX editor window keeps the flags it was attached with, also when it is attached again.)
+    if (styleFlags < 0)
+        styleFlags = (int) c.getProperties().getWithDefault ("lynxNativeFlags", 0);
+    c.getProperties().set ("lynxNativeFlags", styleFlags);
+    c.addToDesktop (styleFlags, handle);
     c.getProperties().set ("lynxNativeChild", true);
     c.getProperties().set ("lynxNativeParent", (juce::int64) (juce::pointer_sized_int) handle);
    #if JUCE_WINDOWS
-    if (! c.isOpaque()) // (a floater: per-pixel transparency)
-        passMissedClicksThrough (c);
+    subclass (c, ! c.isOpaque()); // (not opaque: a floater, with per-pixel transparency)
    #endif
     place (c, area, bounds);
     return true;
@@ -525,6 +688,16 @@ void removeFloater (juce::Component& c)
     dropDeleted (floaters(), &c);
 }
 
+void passInputThrough (juce::Component& c)
+{
+   #if JUCE_WINDOWS
+    if (auto* hwnd = static_cast<HWND> (c.getWindowHandle()); hwnd != nullptr && isAttached (c))
+        SetWindowLongPtr (hwnd, GWL_EXSTYLE, GetWindowLongPtr (hwnd, GWL_EXSTYLE) | WS_EX_TRANSPARENT);
+   #else
+    juce::ignoreUnused (c);
+   #endif
+}
+
 void keepFloatersInFront()
 {
    #if JUCE_WINDOWS
@@ -543,6 +716,89 @@ void keepFloatersInFront()
                 raiseOverlays();
                 return;
             }
+   #endif
+}
+
+bool clickActivatesWindow (const juce::Component& c, bool windowIsForeground)
+{
+    if (c.getMouseClickGrabsKeyboardFocus())
+        return true; // (JUCE's own answer)
+    if (c.isCurrentlyBlockedByAnotherModalComponent())
+        return false; // (a modal dialog: JUCE decides, as before)
+    return ! windowIsForeground;
+}
+
+int mouseActivateAnswerForTest (const juce::Component& c, bool asInactive)
+{
+   #if JUCE_WINDOWS
+    auto* hwnd = static_cast<HWND> (c.getWindowHandle());
+    auto* root = hwnd != nullptr ? GetAncestor (hwnd, GA_ROOT) : nullptr;
+    if (root == nullptr)
+        return 0;
+    const auto was = std::exchange (pretendInactive, asInactive);
+    const auto answer = (int) SendMessage (hwnd, WM_MOUSEACTIVATE, (WPARAM) root, MAKELPARAM (HTCLIENT, WM_LBUTTONDOWN));
+    pretendInactive = was;
+    if (const auto it = subclassedWindows().find (hwnd); it != subclassedWindows().end())
+        it->second.focusAfterActivation = false; // (no button-down follows a question asked by a test)
+    return answer;
+   #else
+    juce::ignoreUnused (c, asInactive);
+    return 0;
+   #endif
+}
+
+juce::String clickActivationSelfTest()
+{
+    // a panel: its clicks don't take the keyboard focus (the Playlist, the Piano roll: PanelFrame)
+    juce::Component panel;
+    panel.setWantsKeyboardFocus (false);
+    panel.setMouseClickGrabsKeyboardFocus (false);
+    panel.setOpaque (true);
+    panel.setSize (300, 200);
+    juce::Component field; // (a control that takes the focus on a click, as JUCE's components do by default)
+    if (! clickActivatesWindow (panel, false))
+        return "ERROR a click in a panel of an inactive window does not activate it";
+    if (clickActivatesWindow (panel, true))
+        return "ERROR a click in a panel of the active window activates it again (the focus would move)";
+    if (! clickActivatesWindow (field, true) || ! clickActivatesWindow (field, false))
+        return "ERROR a control that takes the focus on a click no longer activates its window";
+    {
+        juce::Component dialog;
+        dialog.enterModalState (false);
+        const auto blocked = clickActivatesWindow (panel, false);
+        dialog.exitModalState (0);
+        if (blocked)
+            return "ERROR a click blocked by a modal dialog activates the window";
+    }
+   #if JUCE_WINDOWS
+    if (dockingEnabled())
+    {
+        // the main window's stand-in: a native window, never shown (so it is never the foreground window either)
+        juce::Component host;
+        host.setOpaque (true);
+        host.setBounds (100, 40, 640, 480);
+        host.addToDesktop (juce::ComponentPeer::windowHasTitleBar);
+        if (! attach (panel, host))
+            return "ERROR no native child window";
+        const auto inactive = mouseActivateAnswerForTest (panel, true);
+        const auto hidden = mouseActivateAnswerForTest (panel, false); // (a hidden window is not the foreground one)
+        detach (panel);
+        if (inactive != MA_ACTIVATE || hidden != MA_ACTIVATE)
+            return "ERROR WM_MOUSEACTIVATE answered " + juce::String (inactive) + "/" + juce::String (hidden) + " (MA_ACTIVATE = 1)";
+    }
+   #endif
+    return "OK";
+}
+
+void raiseOnAnyClick (juce::Component& c, std::function<void()> onClick)
+{
+   #if JUCE_WINDOWS
+    auto& list = clickRaises();
+    std::erase_if (list, [&c] (const ClickRaise& r) { return r.component == nullptr || r.component.getComponent() == &c; });
+    list.push_back ({ &c, std::move (onClick) });
+    installClickHook();
+   #else
+    juce::ignoreUnused (c, onClick);
    #endif
 }
 
@@ -662,6 +918,72 @@ int hitCodeAt (const juce::Component& c, juce::Point<int> localPoint)
    #else
     juce::ignoreUnused (c, localPoint);
     return 0;
+   #endif
+}
+
+void* innermostChild (void* window)
+{
+   #if JUCE_WINDOWS
+    auto h = static_cast<HWND> (window);
+    for (int depth = 0; h != nullptr && depth < 24; ++depth)
+    {
+        const auto child = GetWindow (h, GW_CHILD);
+        if (child == nullptr)
+            break;
+        h = child;
+    }
+    return h != static_cast<HWND> (window) ? (void*) h : nullptr;
+   #else
+    juce::ignoreUnused (window);
+    return nullptr;
+   #endif
+}
+
+void postClickForTest (void* window, juce::Point<int> clientPoint)
+{
+   #if JUCE_WINDOWS
+    auto h = static_cast<HWND> (window);
+    DWORD pid = 0;
+    GetWindowThreadProcessId (h, &pid);
+    if (h == nullptr || pid != GetCurrentProcessId())
+        return;
+    const auto at = MAKELPARAM (clientPoint.x, clientPoint.y);
+    PostMessageW (h, WM_LBUTTONDOWN, MK_LBUTTON, at);
+    PostMessageW (h, WM_LBUTTONUP, 0, at);
+   #else
+    juce::ignoreUnused (window, clientPoint);
+   #endif
+}
+
+bool pressSpaceForTest (void* fallback)
+{
+   #if JUCE_WINDOWS
+    auto to = GetFocus();
+    DWORD pid = 0;
+    if (to != nullptr)
+        GetWindowThreadProcessId (to, &pid);
+    if (to == nullptr || pid != GetCurrentProcessId())
+        to = static_cast<HWND> (fallback);
+    if (to == nullptr)
+        return false;
+    const auto scan = MapVirtualKeyW (VK_SPACE, MAPVK_VK_TO_VSC);
+    PostMessageW (to, WM_KEYDOWN, VK_SPACE, (LPARAM) (1u | (scan << 16)));
+    PostMessageW (to, WM_KEYUP, VK_SPACE, (LPARAM) (1u | (scan << 16) | (1u << 30) | (1u << 31)));
+    const auto until = GetTickCount64() + 120;
+    MSG m;
+    while (GetTickCount64() < until)
+    {
+        while (PeekMessageW (&m, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage (&m);
+            DispatchMessageW (&m);
+        }
+        Sleep (5);
+    }
+    return true;
+   #else
+    juce::ignoreUnused (fallback);
+    return false;
    #endif
 }
 
