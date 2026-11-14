@@ -1,3 +1,23 @@
+> [!NOTE]
+> **This is the `control-socket` fork of [Ka1-S/LYNX-SHARE](https://github.com/Ka1-S/LYNX-SHARE).** It is upstream
+> LYNX SHARE plus one addition: a local control socket, so tools such as AI coding agents can drive the app while you
+> watch. It is kept up to date by merging upstream `main`; download links and badges below point to upstream's
+> releases, which do **not** have the socket.
+>
+> **What this fork adds**
+> - `LYNX [/abs/path/project.lynx] --control /tmp/lynx.sock` starts LYNX SHARE listening on a Unix socket (mode 0600,
+>   macOS and Linux) that speaks newline-delimited JSON-RPC 2.0. Code: `src/engine/ControlServer.{h,cpp}`.
+> - Methods: read the project state and notes, list plugins, apply edits, play / pause / stop, select a pattern or
+>   channel and open the piano roll, undo / redo, history, save.
+> - Edit ops: add, change and delete channels (built-in instruments or plugins like Serum 2), shape the built-in
+>   synth, add / rename / delete patterns, write notes, add and delete playlist clips, set the tempo. Every `apply`
+>   is one undo step in the app, all or nothing.
+>
+> **Use it with [LynxShareMCP](https://github.com/calvinw/LynxShareMCP)**, an MCP server for Claude Code and Codex.
+> Its README has the build and install steps, and
+> [docs/PROTOCOL.md](https://github.com/calvinw/LynxShareMCP/blob/main/docs/PROTOCOL.md) documents the socket.
+> This fork has no prebuilt downloads: build it from source.
+
 <p align="center">
   <img src="docs/img/logo.png" alt="LYNX SHARE logo" width="128" height="128">
 </p>
