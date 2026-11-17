@@ -397,7 +397,7 @@ struct RemoteControl::Impl final : juce::Thread
                         if (pattern >= 0) song.currentPattern = pattern;
                     }, false);
                 if (args.hasProperty ("fromTicks"))
-                    engine.seek ((double) integer (args, "fromTicks", 0, maxTick));
+                    engine.seek ((double) integer (args, "fromTicks", 0, remote_notes::detail::maxTick));
                 engine.startPlayback();
                 return object ({ { "playing", engine.getTransport().playing.load() } });
             }
