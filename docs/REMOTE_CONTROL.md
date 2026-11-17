@@ -292,6 +292,37 @@ Device-state refusal checks apply only to these API history calls. Local
 undo/redo and History-window jumps retain normal native behavior after device
 changes, including while Remote Control is off.
 
+## View, transport and file operations
+
+These operations act on what the producer sees and on files, not on project
+data. `api.describe` lists them when the running build has them.
+
+- `transport.pause {}` stops playback and leaves the playhead where it was, so
+  the next `transport.play` resumes there. Like `transport.stop`, it needs no
+  project guard. The result has `playing: false` and `positionTicks`.
+- `transport.play` takes optional `mode` (`"song"` or `"pattern"`), `pattern`
+  (a pattern index, made current first) and `fromTicks` (where to start). It
+  still requires the normal project guard. Changing the mode or the current
+  pattern is view state: it creates no undo step, but it does advance the
+  revision, so read `status` again before the next guarded edit.
+- `ui.select {pattern?, channel?, pianoRoll?}` makes a pattern current, selects
+  a channel in the Channel rack (both by index), and with `pianoRoll: true` opens
+  the Piano roll on them. It needs no project guard and creates no undo step. A
+  pattern change advances the revision as above. The result has `currentPattern`.
+- `project.save {path?}` saves like File › Save: to the project's own file, or
+  to `path`, which must be absolute (`.lynx` is added when missing). A project
+  that has never been saved (or only exists as an autosave) needs a `path`. The
+  result has the saved `path`; a failure has code `failed` and the reason.
+- `project.new {path?}` starts LYNX's default new project, like File › New
+  without its dialog, and saves it to `path` when given (absolute, `.lynx`
+  added, and no file may exist there yet). It is refused with code `busy` while
+  the open project has unsaved changes, so it never discards work. The result
+  has `path` (empty when none was given) and the new `projectId`; the project
+  identity changes, so a client must read `status` again.
+
+These operations write files or change the view, so a client should run them
+only when its user asks.
+
 ## Independent example client
 
 [`examples/remote_control.py`](../examples/remote_control.py) uses only Python's
