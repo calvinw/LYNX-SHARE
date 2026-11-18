@@ -1,3 +1,16 @@
+> [!NOTE]
+> **This is the `remote-api-ui` branch of a fork of [Ka1-S/LYNX-SHARE](https://github.com/Ka1-S/LYNX-SHARE).** It is
+> upstream LYNX SHARE plus five small operations for its official Remote Control API (`lynx-control/1`), so an AI
+> agent can also save, start a new project, pause, play from a position and open the piano roll on a channel:
+> `project.save`, `project.new`, `transport.pause`, `ui.select`, and `mode` / `pattern` / `fromTicks` on
+> `transport.play`. They are documented under
+> [View, transport and file operations](docs/REMOTE_CONTROL.md#view-transport-and-file-operations).
+>
+> **Use it with [LynxShareMCP](https://github.com/calvinw/LynxShareMCP)**, an MCP server for Claude Code and Codex.
+> The MCP works with an official LYNX SHARE release too; this branch only adds those five tools. Download links and
+> badges below point to upstream's releases, which do not have them. This branch has no prebuilt downloads: build it
+> from source.
+
 <p align="center">
   <img src="docs/img/logo.png" alt="LYNX SHARE logo" width="128" height="128">
 </p>
