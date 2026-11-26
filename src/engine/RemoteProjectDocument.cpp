@@ -65,6 +65,7 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
         // formulas and targets, as remoteMappings)
         add (S::root, "playlistRowHeight linkTracksToMixer");
         add (S::root, "slideNoteProps"); // (issue #236, round 190od: slide notes move the note properties)
+        add (S::root, "exportMarkers"); // (fork: Song::exportMarkers is saved in every project; without it every project.edit is refused)
         add (S::root, "beatsLaw190gx", S::readOnly);
         add (S::root, "warpLaw190ik", S::readOnly); // (round 190ik: the Beats detector / Texture / Complex Pro laws' mark)
         add (S::root, "clipNotes190lq", S::readOnly); // (round 190lq: FL's law for the notes of audio clip channels' mark)
