@@ -29,6 +29,7 @@
 #if defined(__SSE__) || defined(_M_X64) || defined(__x86_64__) || defined(__aarch64__) || defined(_M_ARM64) // x86 SSE, or ARM64 through core/Simd.h (sse2neon)
 #include "core/FlControlMenus.h"
 #include "core/LinkFormula.h"
+#include "core/ModulatorExport.h"
 #include "core/Multilink.h"
 #include "core/Simd.h"
 #endif
@@ -143,6 +144,12 @@
 #include "core/DelphiMath.h"
 #include "core/LiveEventQueue.h"
 #include "core/RackRenderer.h"
+#include "core/PerfProjects.h"
+#include "core/TempoMap.h"
+#include "core/ActivityLight.h" // round 190ih
+#include "core/LiveNote.h"
+#include "core/LiveKeys.h"
+#include "core/PresetMix.h"
 #include "core/PinOnTop.h"
 #include "core/MetronomeVoice.h"
 #include "engine/Transport.h"
@@ -193,6 +200,7 @@
 #include "core/Templates.h"
 #include "flp/Flp.h"
 #include "ui/I18nData.h"
+#include "ui/I18nEnglish.h"
 #include "ui/I18nLocale.h"
 #include "core/CrashReport.h"
 #include "core/RenderAhead.h"
@@ -6638,7 +6646,9 @@ TEST (audio_clip_unity_at_fl_default_volume)
     c.instrument = lynx::InstrumentKind::audioClip;
     c.volume = 10000.0f / 12800.0f;
     clip->configure (c, 120.0);
-    clip->noteOn (60, 1.0f);
+    // (a Playlist clip's own key: since round 190lq a key below audioClipKeyBase is a NOTE of the channel, which plays as a
+    // Sampler note — tests/Issue204Tests.inc)
+    clip->noteOn (lynx::audioClipKey (0), 1.0f);
     std::vector<float> l (4800, 0.0f), r (4800, 0.0f);
     const auto g = lynx::channelGain (c.volume);
     clip->render (l.data(), r.data(), 4800, g, g);
@@ -6906,6 +6916,55 @@ TEST (translations_embedded_table_is_up_to_date)
                 std::printf ("  %s.txt changed since the last python3 tools/make_i18n.py\n", id.c_str());
         }
     CHECK (files == (int) std::size (lynx::i18n::data::tables));
+}
+
+TEST (translations_english_display_table)
+{
+    // rollup 0.1.31 step 3 (round 190ny): English shows the three styles of View › Layout style as layouts through its
+    // display table (resources/i18n/en/display.txt, embedded as ui/I18nEnglish.h); the tr() keys stay, so every key of
+    // the table is a key of the translation tables, keeps its placeholders, and the embedded copy is up to date
+    using namespace i18ntest;
+    const auto text = readFile ("resources/i18n/en/display.txt");
+    CHECK (text == std::string (lynx::i18n::data::englishDisplay));
+    if (text != std::string (lynx::i18n::data::englishDisplay))
+        std::printf ("  resources/i18n/en/display.txt changed since the last python3 tools/make_i18n.py\n");
+    std::vector<std::string> duplicates, unused;
+    const auto table = parseTable (text, duplicates);
+    const auto reference = parseTable (readFile ("resources/i18n/pt-BR.txt"), unused);
+    CHECK (duplicates.empty());
+    CHECK (table.size() >= 15);
+    const auto placeholders = [] (const std::string& s) {
+        std::multiset<std::string> out;
+        for (auto at = s.find ('{'); at != std::string::npos; at = s.find ('{', at + 1))
+            if (const auto end = s.find ('}', at); end != std::string::npos)
+                out.insert (s.substr (at, end - at + 1));
+        return out;
+    };
+    int notKeys = 0, workflow = 0;
+    for (const auto& [key, value] : table)
+    {
+        if (reference.count (key) == 0)
+        {
+            ++notKeys;
+            std::printf ("  English display key \"%s\" is not a key of the translation tables\n", key.c_str());
+        }
+        CHECK (placeholders (key) == placeholders (value));
+        workflow += value.find ("orkflow") != std::string::npos ? 1 : 0;
+    }
+    CHECK (notKeys == 0);
+    CHECK (workflow == 0);
+    CHECK (table.count ("Pattern workflow (default)") == 1 && table.at ("Pattern workflow (default)") == "Pattern layout (default)");
+    CHECK (table.count ("Clip-launch workflow") == 1 && table.at ("Clip-launch workflow") == "Clip-launch layout");
+    CHECK (table.count ("Simple workflow") == 1 && table.at ("Simple workflow") == "Simple layout");
+    // every key with "workflow" that English shows is in it
+    int missing = 0;
+    for (const auto& [key, value] : reference)
+        if (key.find ("orkflow") != std::string::npos && table.count (key) == 0)
+        {
+            ++missing;
+            std::printf ("  \"%s\" still shows \"workflow\" in English\n", key.c_str());
+        }
+    CHECK (missing == 0);
 }
 
 TEST (translations_no_value_is_a_python_dict)
@@ -9218,7 +9277,7 @@ namespace
 // velocity map — and the global block. Every other curve is neutral.
 // features (REA_rodada75): 1 arpeggio markers on the volume envelope, 2 noise resonance on filter 1, 4 "pluck replaces
 // blur decay", 8 pluck blend, 16 harmonic randomness, 32 phaser + harmonizer masks
-std::vector<std::uint8_t> harmorTestState (bool panLfo = true, bool image = false, int features = 0)
+std::vector<std::uint8_t> harmorTestState (bool panLfo = true, bool image = false, int features = 0, const std::string& resynthPath = {})
 {
     std::vector<std::uint8_t> b;
     auto i32 = [&] (std::int32_t v) { for (int k = 0; k < 4; ++k) b.push_back ((std::uint8_t) ((std::uint32_t) v >> (8 * k))); };
@@ -9264,6 +9323,10 @@ std::vector<std::uint8_t> harmorTestState (bool panLfo = true, bool image = fals
         for (const auto& [i, v] : std::initializer_list<std::pair<int, int>> { { 82, 200 }, { 83, 100000 }, { 84, 10000 }, { 85, 20000 },
                  { 86, 750 }, { 87, 4 }, { 88, 600 }, { 89, 900 }, { 90, 1 }, { 91, 3 }, { 92, 1500 }, { 93, -300 }, { 94, 800 } })
             p[(std::size_t) i] = v;
+    if (! resynthPath.empty()) // resynthesis: speed 1, linear interpolation, Hz frequency mode, sharpening 750
+        for (const auto& [i, v] : std::initializer_list<std::pair<int, int>> { { 82, 500 }, { 84, 10000 }, { 86, 750 }, { 87, 3 },
+                 { 88, 500 }, { 89, 1000 }, { 90, 1 }, { 91, 3 }, { 92, 1000 } })
+            p[(std::size_t) i] = v;
     for (auto v : p)
         i32 (v);
     for (int i = 0; i < 12; ++i)
@@ -9276,6 +9339,8 @@ std::vector<std::uint8_t> harmorTestState (bool panLfo = true, bool image = fals
     if ((features & 8) != 0)
         put (0x00, 5);
     misc[0x44] = 1;
+    if (! resynthPath.empty())
+        put (0x24, 250); // resynthesis soft knee (part +0x244)
     if ((features & 4) != 0)
         misc[0x46] = 1;
     b.insert (b.end(), misc.begin(), misc.end());
@@ -9353,6 +9418,15 @@ std::vector<std::uint8_t> harmorTestState (bool panLfo = true, bool image = fals
             }
         i32 (0);
         b.push_back (0); // (file name: empty)
+    }
+    if (! image && ! resynthPath.empty())
+    {
+        // a resynthesis image object (round natives190kj): mode 1, ping-pong, no planes, then the sample's path
+        i32 (0), i32 (1), i32 (2), i32 (0);
+        f64 (-1.0), f64 (-1.0), f64 (0.0);
+        i32 (0), i32 (0);
+        b.push_back ((std::uint8_t) resynthPath.size());
+        b.insert (b.end(), resynthPath.begin(), resynthPath.end());
     }
     std::swap (b, part);
     i32 ((std::int32_t) part.size());
@@ -10561,7 +10635,10 @@ TEST (autogun_template_channels)
         opt.autogun = true;
         opt.sgState = sgState;
         opt.tempo = 120.0; // the instrument is configured at 120 BPM
-        const auto ref = lynx::ogun::renderReference (c.pluginState, { { 0, 60, 0.75, 1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 6144 } }, 44100.0, 16384, opt);
+        // (round 190pi: FL's host hands a velocity-linked voice Final.Vol = Init.Vol, (11^(1.28·v) − 1)/10 — Autogun's
+        // default patch scales with the velocity in FL 2026's renders, REA_rodada190pi §3; this state links it)
+        const auto finalVol = (std::pow (11.0, 1.28 * 0.75) - 1.0) / 10.0;
+        const auto ref = lynx::ogun::renderReference (c.pluginState, { { 0, 60, 0.75, finalVol, 0.0, 0.0, 0.0, 0.0, 0.5, 6144 } }, 44100.0, 16384, opt);
         auto inst = lynx::makeInstrument (lynx::InstrumentKind::autogun);
         inst->configure (c, 120.0);
         inst->prepare (44100.0);
@@ -14920,6 +14997,7 @@ TEST (simsynth_engine)
     lynx::ChannelDef c;
     c.instrument = lynx::InstrumentKind::simsynth;
     c.pluginState = blobA;
+    c.engineRev = 1; // (round 190om: the revision before the velocity law, every note at Final.Vol 1)
     auto inst = lynx::makeInstrument (lynx::InstrumentKind::simsynth);
     inst->prepare (44100.0);
     inst->configure (c, 120.0);
@@ -17388,6 +17466,7 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Render155Tests.inc"
 #include "Tune157Tests.inc"
 #include "Tune165Tests.inc"
+#include "Tune190liTests.inc" // round 190li: the vocal pitch toolkit's CPU pass
 #include "HwOut156Tests.inc"
 #include "SoundFont158Tests.inc"
 #include "Mp3157Tests.inc"
@@ -17487,6 +17566,10 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Remote190aiTests.inc"
 #include "StemSplitTests.inc"
 #include "AudioToMidi189bTests.inc"
+#include "Poly2Midi190ljTests.inc"
+#include "PolyEdit190lkTests.inc"
+#include "PolyEdit190loTests.inc"
+#include "PolyEdit190loUiTests.inc" // (round 190lo, UI half)
 #include "Zoom167tTests.inc"
 #include "PianoKeys190jTests.inc"
 #include "Proll168gTests.inc"
@@ -17570,6 +17653,8 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Fluid174eTests.inc"
 #include "Comp177Tests.inc"
 #include "AlsImport175aTests.inc"
+#include "Als190kaTests.inc" // round als190ka (issue #193): .als automation laws, sends, device on / off, Main devices, video clips
+#include "AlsColours190igTests.inc" // round 190ig (CL-6): Live's colour table for .als imports in the Clip-launch layout
 #include "FlmImport182cTests.inc"
 #include "FlmEngines190uTests.inc"
 #include "FlmNotes190abTests.inc"
@@ -17581,6 +17666,13 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "FlmImport189hTests.inc"
 #include "FlmImport189hATests.inc"
 #include "FlmImport189hBTests.inc"
+#include "BandImport190icTests.inc"
+#include "BandImport190jmTests.inc" // round 190jm: issue #184 project (GarageBand for iOS 2.3+ events, Sampler)
+#include "Band184_190mxTests.inc" // round 190mx: issue #184 (GarageBand for iOS 2.3+ signature)
+#include "Issue198_190mxTests.inc" // round 190mx: GitHub #198 follow-up (plugin-window knobs recorded as automation)
+#include "Blx190jrTests.inc"
+#include "Stems190jrTests.inc"
+#include "SimpleGb190keTests.inc" // round 190ke: GarageBand / BandLab ideas in Simple (fade-out, Controls, tuner, factory tags)
 #include "FlmImport189hCTests.inc"
 #include "FlmImport190bsTests.inc"
 #include "PocketFx190byTests.inc" // round 190by
@@ -17598,11 +17690,25 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Session190bvTests.inc"
 #include "DetailView183aTests.inc"
 #include "Als181cTests.inc"
+#include "DetailView190hrTests.inc"
 #include "Groove190fmTests.inc"
 #include "AlsDevices190bqTests.inc"
 #include "AlsDevices190cfTests.inc"
 #include "AlsDevices190edTests.inc"
+#include "LiveDev190kkTests.inc" // round 190kk: Erosion → Corrode, Vinyl → Platter, Corpus → Soundboard, Looper, MIDI Effect Racks (uses als190cf::)
+#include "Meld190koTests.inc" // round 190ko: Meld → Braid, Spectral Time → Timeprism, Spectral Resonator → Harmonia (uses als190cf::)
 #include "AlsDevices190ekTests.inc"
+#include "Tetra190hsTests.inc" // round 190hs
+#include "LynxModel190niTests.inc" // round 190ni
+#include "LynxModel190nlTests.inc" // round 190nl
+#include "LynxModel190nmTests.inc" // round 190nm
+#include "LynxModel190nnTests.inc" // round 190nn
+#include "Tetra190ixTests.inc" // round 190ix
+#include "Helix190jaTests.inc" // round 190ja
+#include "Helix190miTests.inc" // round 190mi
+#include "Helix190mlTests.inc" // round 190ml
+#include "Helix190mtTests.inc" // round 190mt
+#include "Helix190ocTests.inc" // round 190oc: Helix round 4 (grain / spectral unison, reverse grains)
 #include "AlsDevices190fmTests.inc"
 #include "Merge180cTests.inc"
 #include "Slicer180cTests.inc"
@@ -17634,6 +17740,7 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Lfo177bTests.inc"
 #include "Curves190bwTests.inc"
 #include "Mod177bTests.inc"
+#include "Mod190oxTests.inc" // round 190ox: modulators stage 2
 #include "UiFont179aTests.inc"
 #include "Multilink177bTests.inc"
 #include "Issue97Tests.inc"
@@ -17644,6 +17751,7 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "LayoutStyle184aTests.inc"
 #include "Rack116Tests.inc"
 #include "Issue116DetachedTests.inc"
+#include "Issue282TrialMarkTests.inc" // round 190qs: issue #282, FL's trial mark and the FL generators' round trip
 #include "Trial187bTests.inc"
 #include "ProjectKey184aTests.inc"
 #include "KeyGuess184aTests.inc"
@@ -17673,6 +17781,7 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Layer190bTests.inc"
 #include "PlugLevel190adTests.inc"
 #include "Undo190bTests.inc"
+#include "Undo190mzTests.inc"
 #include "TrackMeters190wTests.inc"
 #include "Locator190wTests.inc"
 #include "Bugs190cTests.inc"
@@ -17690,11 +17799,13 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Slicex190acTests.inc"
 #include "Slicex190ajTests.inc"
 #include "Slicex190hgTests.inc"
+#include "Slicex190hzTests.inc"
 #include "ScaleSnap190anTests.inc"
 #include "TruePeak190amTests.inc"
 #include "Loudness190amTests.inc"
 #include "UsedOnly190amTests.inc"
 #include "Extras190amTests.inc"
+#include "Workflow190iuTests.inc" // round 190iu: issues #186 and #191
 #include "Reload190aoTests.inc"
 #include "Pin190aoTests.inc"
 #include "Velocity190aoTests.inc"
@@ -17704,6 +17815,8 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "PluginsOff190apTests.inc"
 #include "ExportSections190apTests.inc"
 #include "DirectWave190ajTests.inc"
+#include "core/DirectWaveState.h"
+#include "DirectWave190hzTests.inc"
 #include "Similar190asTests.inc"
 #include "Controller190awTests.inc"
 #include "ControllerProfiles190awTests.inc"
@@ -17714,6 +17827,8 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Maps190caTests.inc"
 #include "Mpe190bbTests.inc"
 #include "Mpe190bbLiveTests.inc"
+#include "Mpe190hyTests.inc"
+#include "Mpe190hyAlsTests.inc"
 #include "PluginDb190baTests.inc"
 #include "PerfWin190gdTests.inc"
 #include "Ram190gnTests.inc"
@@ -17730,10 +17845,14 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Settings190bxTests.inc"
 #include "Link190btTests.inc"
 #include "LiveBrowser190ceTests.inc"
+#include "LoopBrowser190kfTests.inc" // round gaps190kf: the Loop Browser's keywords and filters
+#include "Browser190izTests.inc" // round 190iz: Browser tags, FL tabs, Live sidebar, send to selected, 5-s preview
 #include "SimpleFx190buTests.inc"
 #include "SimpleGate190dgTests.inc"
 #include "SimpleNext190dsTests.inc"
 #include "FirstSongTour190dvTests.inc"
+#include "Onboarding190npTests.inc" // round 190np: first-run onboarding (core/Onboarding.h)
+#include "Offline190nxTests.inc" // round 190nx: offline mode (core/Offline.h)
 #include "SimplePads190foTests.inc"
 #include "Rollup027Tests.inc"
 #include "Edison190cdTests.inc"
@@ -17756,6 +17875,7 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Link190csTests.inc"
 #include "TrackLinkTests.inc"
 #include "TrackAuto190gzTests.inc"
+#include "Issues190htTests.inc"
 #include "Warp190dbTests.inc"
 #include "WarpModes190fmTests.inc" // round 190fm
 #include "WarpLive190gxTests.inc" // round 190gx
@@ -17769,8 +17889,57 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "Iss152Tests.inc"
 #include "Win190evTests.inc"
 #include "U190heTests.inc"
+#include "U190hxTests.inc"
+#include "U190klTests.inc"
+#include "D190jyTests.inc"
 #include "Mod190doTests.inc"
 #include "Parity190fyTests.inc"
+#include "Parity190hoTests.inc"
+#include "Parity190iqTests.inc"
+#include "Parity190itTests.inc"
+#include "Parity190lnVrTests.inc" // round 190ln: Foil Plate on ValhallaPlate's own EQ / bass-decay laws (after Parity190it: its gold helpers)
+#include "Parity190lsTests.inc" // round 190ls: Atrium on a dense late tank for the ValhallaRoom role (after Parity190it: its gold helpers)
+#include "Parity190lyTests.inc" // round 190ly: Atrium's dense tank only for a translated ValhallaRoom; Valhalla stand-ins part 2
+#include "Parity190mbTests.inc" // round 190mb: Valhalla stand-ins part 3 (Supermassive tone, FutureVerb, SpaceModulator modes; after Parity190ly: its helpers)
+#include "Parity190mjTests.inc" // round 190mj: Orbit = ValhallaSpaceModulator's own voices (hidden voiceLaw; after Parity190mb)
+#include "Parity190mjHzTests.inc" // round 190mj: FutureVerb → Horizon part 2 (echo modes, Room / Chamber over Size; after Parity190mb)
+#include "Parity190jhTests.inc" // round 190jh: Facet's automatic threshold, Pro-Q 4 dynamic bands, Waves L2 / SuperTap / SSLComp / CLA-76
+#include "Parity190jsTests.inc" // round 190js: the Waves reverbs on Reeverb 2, Hush's Single Vocal revision, Facet's auto-threshold refit
+#include "Parity190ktTests.inc" // round 190kt: REA of the Waves SSLComp DSP, Crest's console law, SSLComp on Crest
+#include "Parity190lbTests.inc" // round 190lb: black-box study (no decryption); SSL 4K G Pink EQ + output ceiling
+#include "Harrison190leTests.inc" // round 190le: Ridge Strip's 32C voicing (Harrison 32Classic EQ law)
+#include "Parity190kyTests.inc" // round 190ky: Crest's FET law (REA of the Waves CLA-76 DSP), CLA-76 on it
+#include "Parity190lgQ4Tests.inc" // round 190lg: Facet's automatic threshold on Pro-Q 4's structure (revision 1; after Parity190jh / 190js)
+#include "Parity190kwTests.inc" // round 190kw: static REA — Crest's Pro-C 3 V1 / V2 style laws (hidden revision)
+#include "Parity190lgVersTests.inc" // round 190lg: Crest Allround = Pro-C 3 Versatile (revision 1; after Parity190kw: its helpers)
+#include "Parity190lpCrestTests.inc" // round 190lp: Crest Smooth / Op-El = Pro-C 3's own graphs (revision 1; after Parity190kw: its helpers)
+#include "Parity190mbCrestTests.inc" // round 190mb: Crest Upward / Vari-mu = Pro-C 3's own Upward graph and Vari-Mu tube node (revision 1; after Parity190kw: its helpers)
+#include "Parity190mjCrestTests.inc" // round 190mj: Crest Two-way = Pro-C 3's own TTM band processors (revision 1; after Parity190kw: its helpers)
+#include "Parity190lgMbTests.inc" // round 190lg: Prism revision 1 on Pro-MB's own band compander graph (after DynamicsTests108: its helpers)
+#include "Parity190lpLgTests.inc" // round 190lp: Apex Limiter / Sentry Gate revision 1, black-box refit on Pro-L 2 / Pro-G (after DynamicsTests108: its helpers)
+#include "Parity190kwTl3Tests.inc" // round 190kw: Timeless 3 states on Echoform (the hidden line law)
+#include "Parity190kwVvTests.inc" // round 190kw: Epoch Verb's level on ValhallaVintageVerb's loop law (after Parity190it: its gold helpers)
+#include "Parity190kwSatTests.inc" // round 190kw: Saturn 2 -> Ember, the styles' own laws (hidden revision)
+#include "Parity190lfTests.inc" // round 190lf: the Limiter's L2 law (REA of the Waves L2 DSP), L2 on it; PuigTec EQP1A on Facet EQ
+#include "Parity190lfDynTests.inc" // round 190lf (dyn): Glow Leveler's cell law (REA of the Waves CLA-2A), CLA-2A on it
+#include "Parity190lfVerbTests.inc" // round 190lf (verb): H-Delay's measured loop (Echoform hybrid law 1), TrueVerb's direct sound
+#include "Parity190lfNs1Tests.inc" // round 190lf (ns1): Quell's zero law (REA of the Waves NS1: 0 % = its bare all-pass pair), NS1 on it
+#include "Parity190lnTests.inc" // round 190ln: Eiosis AirEQ / Slate Infinity EQ translated onto Facet EQ in physical units
+#include "Parity190lnKhsTests.inc" // round 190ln: Kilohearts states (kHs snapins, Faturator, Disperser) on LYNX stand-ins
+#include "Parity190nbKhsTests.inc" // round 190nb: Kilohearts laws on Effector (Ring Mod, Reverser, Resonator, Phase Distortion, Shaper) + measured maps
+#include "Parity190nhKhsTests.inc" // round 190nh: Kilohearts part 2 (Comb Filter, Chorus, Trance Gate, Phaser, Distortion, Bitcrush, Frequency Shifter, Ensemble)
+#include "Parity190ocKhsTests.inc" // round 190oc: Kilohearts Nonlinear Filter
+#include "Parity190kwR2Tests.inc" // round 190kw: Pro-R 2 → LuxeVerb Space, the Space engine's revision 1 (recovered laws)
+#include "Parity190lpR2Tests.inc" // round 190lp: Pro-R 2 → LuxeVerb Space revision 1, the reference's fixed early taps (after Parity190kwR2: its helpers)
+#include "Parity190mgC4Tests.inc" // round 190mg: Prism's hidden C4 law (REA of the Waves C4), C4 on it
+#include "Parity190mgRenTests.inc" // round 190mg (ren): Compressor's Renaissance law (REA of the Waves Renaissance Compressor), RComp on it
+#include "Parity190mgNs1Tests.inc" // round 190mg (ns1): Quell's NS1 law (REA of the Waves NS1: its own structure for 20 … 100 %), NS1 on it
+#include "Parity190mgVocTests.inc" // round 190mg (voc): the Waves Doubler DSP's splice law on Gemini, the Waves Tune RT law on LYNX Tune
+#include "Parity190mgDynTests.inc" // round 190mg (dyn): Facet's PuigTec law, L2's IDR on the Limiter (REA of the Waves PuigTec / L2 DSP)
+#include "Parity190mmTests.inc" // round 190mm: Facet's Waves design law (REQ, Q10), API-550 / 560 on Facet, SSL G-Channel on Ridge
+#include "Parity190mmSchepsTests.inc" // round 190mm (scheps): the Scheps Omni Channel on Ridge Strip's hidden omni law (five modules, order)
+#include "Parity190mmDynTests.inc" // round 190mm (dyn): Waves RVox / RDeEsser / C6 / API-2500 / MaxxBass / RBass / Vitamin stand-ins on hidden laws
+#include "Parity190mtTests.inc" // round 190mt: SSL G EQ law (Ridge), Q10 exact bell, API-560 law (Facet, 65-sample latency), RChannel RVox type
 #include "Sampler190dhTests.inc"
 #include "Fix190eaTests.inc"
 #include "Iss158Tests.inc"
@@ -17802,4 +17971,150 @@ TEST (fl_low_lifter_matches_fl_engine)
 #include "EvPane190fzTests.inc"
 #include "U190heLinkTests.inc" // round 190he (issue #152 item 2: linkable LYNX instruments, knobs that follow links)
 #include "PluginDrop190hfTests.inc" // issue #152 point 6: plugins dropped on the tracks (FL and Live layouts)
+#include "PickerDrop190hmTests.inc" // issue #177: Picker panel entries dragged onto the Playlist
+#include "Community190hpTests.inc" // round 190hp: global MIDI mappings, mix snapshots, split at silence (0.1.28 pain report B9/B16/B18)
 #include "Rollup028Tests.inc" // round 190fv: semantic interactions of the 0.1.28 rollup
+#include "Design190igTests.inc" // round 190ig: automation clip colours (design190ia slice 3)
+#include "Pdc190hqTests.inc" // round 190hq B13: side inputs, level automation and render-ahead under PDC
+#include "TempoMarkers190hqTests.inc" // round 190hq B11: tempo markers, resampled audio under them, scene tempo hold
+#include "UserFix190ibTests.inc" // round 190ib: issues #165 (SoundFont same-step slide), #170, #181, #182, #183
+#include "LiveRack190hrTests.inc" // round 190hr: Live Racks finish (Group / Ungroup of an instrument, .adg presets)
+#include "Formats190iiTests.inc" // round 190ii (issue #149): .dwp / .dwb / .gig / NCW / Kontakt detection
+#include "Simple190jcTests.inc" // round 190jc: the Simple layout's BandLab / FLM look (design190ia slices 5, 14, 15, 22, 24)
+#include "Rollup030Tests.inc" // round 190il: semantic interactions of the 0.1.30 rollup (keep last)
+#include "Bug190ieTests.inc" // round 190ie (issue #185: tempo automation through the basic Delay)
+#include "Perf190kgTests.inc" // round 190kg: the basic Delay's faster loops render round 190ie's samples bit for bit
+#include "Harm190krTests.inc" // round beatfl190kr: Harmless's vector sine bank, Vocodex's sliding max: the old bits
+#include "Shift190krTests.inc" // round 190kr: Signalsmith Stretch's faster loops render the base commit's pitch shifts bit for bit
+#include "Perf190krTests.inc" // round 190kr: the FL-native mixer effects' faster kernels render the plain loops' samples bit for bit
+#include "PerfGate190idTests.inc" // round perfgate190id: the performance gate's synthetic projects (community slice B12)
+#include "Details190ihTests.inc" // round 190ih: DETAILS slices R2, R3, R4, R7, R9, R12, R14
+#include "Rackmix190ioTests.inc" // round 190io: FL rack + Mixer landmarks, Mixer details, issue #154 part 2
+#include "Bugs190irTests.inc" // round 190ir: issue #189 text size, takes on the tracks FL picks (Discord report)
+#include "Parity190isTests.inc" // round 190is: Echoform voicings revision 1, the Soundtoys echoes' own defaults
+#include "Warp190ikTests.inc" // round 190ik: Complex Pro, granular Texture, the pitch-aware Beats detector
+#include "Details190imTests.inc" // round 190im: activity meter reader, deactivated grid clips, Live keys 0 / Ctrl+E
+#include "Toolbar190ivTests.inc" // round 190iv: the toolbar per layout style (Simple capsules, Live control bar)
+#include "MidiOutHw190jlTests.inc" // round 190jl: MIDI Out channels to hardware MIDI outputs (Discord #help)
+#include "Hosting190jgTests.inc" // round 190jg: sample-accurate automation for hosted plugins (BUILD-LIST 18)
+#include "G1menus190jeTests.inc" // round 190je: contrast floors, one state language, grid intensity, FL menus (design190ia G1, FW-S3)
+#include "Capfix190jjTests.inc" // round 190jj: capture190ji changes (transport states per look, the master bar meter)
+#include "Livefix190jdTests.inc" // round 190jd: live check 190iw — previews, automation clip colours, count-in, Gross Beat locator, .flp audio clip step
+#include "Livefix190jdATests.inc" // round 190jd: DirectWave zone map, Slicex deck Snap menu and play line
+#include "Livefix190jdBTests.inc" // round 190jd: the Clip View MPE tab as Live 12.4
+#include "Livefix190jdCTests.inc" // round 190jd: Mixer peak hold and Extra large list, Limiter / Maximus history
+#include "Folders190jfTests.inc" // round 190jf: B17 Playlist folders (nested groups, FL group mute / solo, Alt+drag)
+#include "DawProject190jfTests.inc" // round 190jf B22: DAWproject import / export (core/DawProject.h, core/ZipLite.h)
+#include "Polish190jpTests.inc" // round 190jp: Theme Adjustments and colour dots, bold interface text, Simple follow-ups
+#include "LiveLook190jnTests.inc" // round 190jn: the Clip-launch layout in Live's look (the Info View key)
+#include "Playlist190jqTests.inc" // round 190jq: Playlist header width (#164), pointer click (#191), automation clip lanes (#191.3)
+#include "Slides190jvTests.inc" // round 190jv: FL's stepped slide notes on its native generators
+#include "Trim190jvTests.inc" // round 190jv: Mixer › Trim unused tracks (FL's Remove unused tracks)
+#include "Pr190jvTests.inc" // round 190jv: Piano roll Scale highlighting › Automatic (FL's key guess)
+#include "PrArp190jvTests.inc" // round 190jv: FL's Piano roll arpeggiator patterns (TPRArpForm law)
+#include "Flm190jvTests.inc" // round 190jv: FL Studio Mobile racks with several instruments / an effect first (BUILD-LIST 19)
+#include "FlmExport190ogTests.inc" // round 190og: Save a copy as FL Studio Mobile project (.flm), the writer, the LYNX chunk
+#include "Spin190kbTests.inc" // round 190kb: the worker pool's waiting (statistics, tuning, bounded task-graph waits, adaptive spin)
+#include "Beat190krTests.inc" // round 190kr: the worker pool wakes only the workers a chunk's work needs; the same samples
+#include "Lighter190laTests.inc" // round 190la: timed waits without the sub-millisecond spin (platform/CvWait.h)
+#include "Sched190kzTests.inc" // round 190kz: one worker-pool round per device block cut in pieces; the same samples
+#include "Sched190lvTests.inc" // round 190lv: batched blocks with live controllers (two rounds: their sources, then the rest); the same samples
+#include "Export190kaTests.inc" // round als190ka-export (owner decision D5): AIFF and M4A (AAC) export
+#include "Issues190jzTests.inc" // round 190jz: issues #192 (docked Browser), #194 (clip fade handles), #195 (Home, W)
+#include "PrChord190kdTests.inc" // round 190kd: FL's chord tool strip (Generate modes, Analyze, Learn from MIDI input, note options)
+#include "ClipLaunch190kcTests.inc" // round 190kc: Live return tracks, crossfader, relative session mappings, audio grooves
+#include "Gaps190kfTests.inc" // round gaps190kf: Live Transpose ±48 in real time, the Clip View warp time line
+#include "Gaps190kfNativesTests.inc" // round gaps190kf: FL Edison's Sample properties (form, Accept, WAV chunks)
+#include "Natives190kjNewtoneTests.inc" // round natives190kj: Newtone note analysis as FL's (tiling, whole-sample pitch, fades), editor commands
+#include "Natives190kjEdisonTests.inc" // round natives190kj: FL Edison Dual view, grid step, pitch-period snap, grid-slicing, scrub, pitch regions
+#include "Natives190kjHarmorTests.inc" // round natives190kj: Harmor resynthesis (analysis, voice, engine revision)
+#include "Qa190kpTests.inc" // round qa190kp: Follow pause after a layout switch during playback
+#include "QaFix190kqTests.inc" // round qafix190kq: QA-1/2/6/9/10 release blockers of 0.1.30
+#include "QaFix190kqReportTests.inc" // round qafix190kq: the import report's "not reproduced" list apart from the synth-preset instruments
+#include "Details190knTests.inc" // round details190kn: FL mute-switch modifiers (Unmute All, Lock state, slot solo), BandLab chain-preset stepper
+#include "Own190ksTests.inc" // round 190ks: GitHub #198, the notes a plugin plays from its own window are recorded
+#include "Stoys190kvTests.inc" // round 190kv: the Soundtoys factory presets (fingerprint of the encoded payload -> their own settings)
+#include "Details190ldTests.inc" // round details2_190ld: FL slot and Playlist track lock state, Live Shift+Space continue, FL tool names
+#include "Details190ldPluginTests.inc" // round details2_190ld: Vocoder band levels published while watched, Patcher activity measured only while watched
+#include "Ara190kxTests.inc" // round 190kx: ARA 2 on audio clips (the clips as playback regions, ids, tempo, the clip menu)
+#include "LoopAnalysis190kxTests.inc" // round 190kx: loop analysis (key and tempo of the user's own loops; core/LoopAnalysis.h)
+#include "Vocal190liTests.inc" // round 190li: Newtone natural engine (engine 1), modulation / drift split, sung centre, analysis octave guard
+#include "Newtone190lmTests.inc" // rollup 0.1.30 step 8: a new Newtone slot (natural engine) analysed with "Separate close notes"
+#include "Rollup190luTests.inc" // rollup 0.1.30 step 9: per-block batching vs plugins' own notes (190kz x 190ks), LYNX Tune's held notes
+#include "Rollup190meTests.inc" // rollup 0.1.30 step 10: round 190lv's fix, a block of too many pieces still plays (190kz batching)
+#include "Codegen190kzTests.inc" // round 190kz codegen: runtime CPU dispatch (AVX2 paths render the SSE2 bits)
+#include "Dsp190kzTests.inc" // round 190kz: exact Reeverb 2 LFO sine and sinc seeds, Maximus revision 1
+#include "Issue204Tests.inc" // round 190lq: issue #204, an audio clip channel played from notes (whole clip, layered, key pitch)
+#include "Issues190llTests.inc" // round 190ll: issues #199 (hosted synth from the piano roll), #200, #201, #203
+#include "Details190lrTests.inc" // round details3_190lr: the Simple Drum Machine (BandLab steps), Live scene follow actions
+#include "Issues190lwTests.inc" // round 190lw: issues #205 / #206 / #207 (row bands, second click, automation point editing)
+#include "Details190lxTests.inc" // round details4_190lx: Live slot-block clipboard, separate Punch-In / Punch-Out
+#include "Issue208Tests.inc" // round 190ma: issue #208, the graph editor's Note pitch, Shift and Repeat (FL note repeat)
+#include "Details190mfTests.inc" // round details5_190mf: FL normal meter law (Pattern default), Channel rack "+" menu cache, details pass 5
+#include "Modal190mcTests.inc" // round 190mc: the Piano roll's Chord helper (discussion #105) and Transistor Bass's program row (discussion #202)
+#include "KeyRegions190nuTests.inc" // round chord2_190nu: key regions (FL key markers), the Scale degree chord, pinned Chord helper relationships (discussion #105)
+#include "Details190mkTests.inc" // round details6_190mk: Live insert marker, rack zip, details pass 6
+#include "Details190mpTests.inc" // round details7_190mp: FL Half speed, Auto name clips, Restretch all, details pass 7
+#include "Issues190mqTests.inc" // round 190mq: issues #211 / #212 / #213 (paste per layout, key-row shading, ruler double click)
+#include "core/Details190mr.h"
+#include "Details190mrTests.inc" // round details8_190mr: click-and-hold, rack Auto Select, undo / warning / layout options, details pass 8
+#include "core/Details190mv.h"
+#include "core/PluginHelp.h" // (round 190oa)
+#include "Details190mvTests.inc" // round details9_190mv: undo knob tweaks and the rest of details pass 9
+#include "Details190myTests.inc" // round details10_190my: the Current track follow-ups and details pass 10
+#include "Details190oaTests.inc" // round details11_190oa: details pass 11 (the audit's last open rows)
+#include "Mixer221_190ngTests.inc" // round 190ng: issue #221 (Del with only the used inserts shown)
+#include "Issues190ngTests.inc" // round 190ng: issues #215, #217, #219, #220, #222
+#include "Rack190ncTests.inc" // round 190nc (0.1.31): Live's Solo / Cue (DL-110) and the Macro Map pick (DL-95)
+#include "TrackClips190neTests.inc" // round 190ne (0.1.31): track clips, "Clips own their notes" (core/TrackClips.h)
+#include "Leftovers190nrTests.inc" // round 190nr: leftovers of the 0.1.30 release
+#include "Bugs190nqTests.inc" // round 190nq: issues #229, #193, #223, #226 (bugs)
+#include "Issues190nqTests.inc" // round 190nq: issues #225, #227, #228, #230
+#include "Issues190nsTests.inc" // round 190ns: issues #231, #233, #234, #235
+#include "Tracker190nwTests.inc" // round 190nw (0.1.31): the built-in tracker, stage 1 (core/TrackerGrid.h, core/ModuleImport.h)
+#include "CrossPaste190nzTests.inc" // round 190nz: issue #232 stage 2 (copy and paste between windows)
+#include "Issues190odTests.inc" // round 190od: issues #236, #238, #239, #240
+#include "Issues190oqTests.inc" // round 190oq: issues #243 (ARA insert, tempo map), #252 (start page)
+#include "Perf190ofTests.inc" // round 190of: the monitor's Longest / Spikes, the split CPU meter (P24), latency check
+#include "Tracker190obTests.inc" // round 190ob (0.1.31): tracker follow-ups (module volume automation, the default key)
+#include "Gap190ogTests.inc" // round gap190og (0.1.31): Live Duplicate Loop, Crop Clip, velocity Randomize, mappable transport, Edit menu on devices
+#include "Host190ohTests.inc" // round 190oh: plugin host review, FL's wrapper Settings › GUI (P3)
+#include "Sections190olTests.inc" // round 190ol (0.1.31): the Sections lane (P1) and Simple time signature changes (P6)
+#include "ChordLane190pfTests.inc" // round 190pf (0.1.32): the Chord lane (P13) and Smart Tempo (P12)
+#include "Research190onTests.inc" // round 190on: command palette (P2), Tab to transient (P8), stacked lanes (P10), removing a guest
+#include "Perf190okTests.inc" // round 190ok: safe overloads (P24), generator smart disable (D2), the smart-disable tip (D1), fast maths (D3)
+#include "Design190ooTests.inc" // round 190oo (0.1.31): design review 2, the owner's options with rules in core
+#include "Lanes190ooTests.inc" // round 190oo (design review 2, lanes): Live envelope lanes (CS-19), lanes folded on open (CS O-3), Live scale control (O-5)
+#include "SimpleFl190ooTests.inc" // round 190oo (design review 2, CS-24): S / volume / pan on an FL project's tracks in Simple
+#include "Pat6_190ooTests.inc" // round 190oo (design review 2): PAT-6, the Playlist row from FL's vertical zoom (event 0xF2)
+#include "DialogRules190ooTests.inc" // round 190oo: the one dialog system's button order and pixel bands (core/DialogRules.h)
+#include "RackAutomation190ooTests.inc" // round 190oo (design review 2, PAT-7): FL's automation clip channels in the Channel rack
+#include "RackAutomation190owTests.inc" // round 190ow (PAT-7 rest, DE-123): triggered automation clips, MIN / MAX, mute, rack order export
+#include "TextFit190ooTests.inc" // round 190oo (design review 2, fit): translated menu titles give up width before toolbar panels drop, knob captions
+#include "OldSteps190ozTests.inc" // round 190oz: FL <= 11 step grids (0x41 + 0x5B / 0x48 ... in a channel) become step notes
+#include "HeldSteps190ozTests.inc" // round 190oz: FL step notes on generators are held (no note-off)
+#include "FlParity190piTests.inc" // round 190pi: Sytrus slide velocity, arpeggio glides, chord slides, Ogun link velocity, FL 11 parameters
+#include "FlParity190prTests.inc" // round 190pr: Harmor automation, FL song-start values of Harmor / Sytrus / FL effects
+#include "PatcherXyz190ptTests.inc" // round 190pt: Patcher Control Surface / X-Y-Z links, Vocodex controls under automation
+#include "Perf190osTests.inc" // round 190os: the safe-overload guard lets go at the stop and within 1 s of the overload's end
+#include "Tracker190omTests.inc" // round 190om (0.1.31): tracker stage 2 (pattern events, pitch curves, Bxx / Vxx), SimSynth velocity
+#include "Rollup031s6Tests.inc" // rollup 0.1.31 step 6: gold sweep for 190om decisions 4-5 (LYNX_SWEEP_DIR)
+#include "TrackStates190opTests.inc" // round 190op (0.1.31): Hide / Deactivate tracks (P4), Capture automation (P7)
+#include "SimpleDuck190otTests.inc" // round 190ot (0.1.31): Simple "Duck under..." (sidechain in one pick) and the shared Echo send (P5)
+#include "HWheel254Tests.inc" // round 190ou: issue #254, the horizontal wheel
+#include "AutoLinks190ovTests.inc" // round 190ov (0.1.31): FL automation clips linked to several controls
+#include "PluginPack190ovTests.inc" // round 190ov (0.1.31): the later LYNX-own engines in the plugin pack
+#include "AutoModes190paTests.inc" // round 190pa (0.1.31): automation write modes (P21), range edits on chosen tracks (P14)
+#include "Tracks190peTests.inc" // round 190pe (0.1.31): track versions (P20) and the import of tracks from another project (P11)
+#include "Jsfx190pjTests.inc" // round 190pj (0.1.32): JSFX support stages 1-2 (issue #241)
+#include "Issue258_190pvTests.inc" // round 190pv: issue #258, a cloned channel's own automation drives its sound
+#include "Issues190qbTests.inc" // round 190qb: issue follow-ups (#215 folders in the export name)
+#include "Hotfix190qpTests.inc" // round 190qp (0.1.31.1): imported FL volume / send / filter automation, linked clips shown
+#include "Hotfix190raTests.inc" // round 190ra (0.1.31.2): a set pattern length grows with the notes drawn past it
+#include "Hotfix190raLanesTests.inc" // round 190ra (0.1.31.2): round 190qu's automation lanes that play what the clips played
+#include "Issue269_190qmTests.inc" // round 190qm: issue #269, the hint bar's right-click crash
+#include "Hotfix190qpWfTests.inc" // round 190qp: 0.1.31.1 hotfix (track clips open their notes)
+#include "Issues274_190qrTests.inc" // round 190qr: issues #278 (AppImage manager entries), #281 (markers delete)
+#include "Hotfix190rcFlpDataTests.inc" // round 190rc: the .flp export writes the project data folder only when it is on this computer (FL 2026: "Invalid project data folder")
+#include "Hotfix190rcPresetsTests.inc" // round 190rc: issue #288, FL presets of the native generators open the generator itself
+#include "Qa190rbTests.inc" // round 190rb (0.1.32 quality): crash / memory fixes from the crash reports, ASan / UBSan and the UI monkey

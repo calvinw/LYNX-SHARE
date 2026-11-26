@@ -358,6 +358,94 @@
     int rhythmDrag = -1;
     float rhythmStartX = 0.0f;
 
+    // --- round 190ld (DP-32): Fruity Vocoder's live band levels ------------------------------------------------------
+    // The effect publishes up to 32 columns, 6 bits each (0 = −60 dB or less … 63 = 0 dB), four per meter output 0…7
+    // (core/Effects.cpp Vocoder::controlOutput). The timer repaints the band display only when a column changed (one
+    // last frame when the signal stops); a held HOLD freezes the envelopes, so nothing is redrawn.
+    std::array<std::uint32_t, 8> vocBandsSeen {};
+    int vocHoldParam = -1; // the HOLD button held down (released on mouse up)
+
+    float vocoderBandLevel (int column) const
+    {
+        if (column < 0 || column >= 32)
+            return 0.0f;
+        return (float) ((vocBandsSeen[(std::size_t) (column / 4)] >> (6 * (column % 4))) & 63u) / 63.0f;
+    }
+
+    void vocoderBandsTick()
+    {
+        std::array<std::uint32_t, 8> now {};
+        for (int k = 0; k < 8; ++k)
+            now[(std::size_t) k] = (std::uint32_t) juce::jlimit (0.0f, 16777215.0f, liveMeter (k));
+        if (now == vocBandsSeen)
+            return;
+        vocBandsSeen = now;
+        for (const auto& item : activeLayout().items)
+            if (item.type == Item::display && item.display != nullptr && std::strcmp (item.display, "vocbands") == 0 && visible (item))
+                repaint (rectOf (item).getSmallestIntegerContainer().expanded (1));
+    }
+
+    // --- round 190oa (DP-33, capture 190oa C7): the band levels drawn with the mouse ----------------------------------
+    // FL's bands display takes drags: a band's level follows the mouse (its line), a drag across draws a ramp; the hint
+    // reads "Band 2 - 92Hz  100%". The levels are the state's analysis band levels (1 = 0 dB, its line at 68 % height).
+    static constexpr float vocUnityHeight = 0.68f;
+    bool vocDragging = false;
+    int vocLastColumn = -1;
+    float vocLastLevel = 0.0f;
+    bool isVocBands (const LayoutItem& item) const { return kind == EffectKind::vocoder && item.type == Item::display && juce::String (item.display) == "vocbands"; }
+    juce::Rectangle<float> vocInner (const LayoutItem& item) const { return rectOf (item).reduced (6.0f * scale()); }
+    fvocoder::State vocState() const
+    {
+        const auto* fx = current();
+        return fx != nullptr ? fvocoder::parse (fx->state).value_or (fvocoder::State()) : fvocoder::State();
+    }
+    int vocColumnAt (const LayoutItem& item, float x, int columns) const
+    {
+        const auto r = vocInner (item);
+        return juce::jlimit (0, columns - 1, (int) ((x - r.getX()) / r.getWidth() * (float) columns));
+    }
+    float vocLevelAt (const LayoutItem& item, float y) const
+    {
+        const auto r = vocInner (item);
+        return juce::jlimit (0.0f, 1.0f / vocUnityHeight, (r.getBottom() - y) / juce::jmax (1.0f, r.getHeight()) / vocUnityHeight);
+    }
+    // the columns c0 … c1 set along the line between their levels (a column = bands / 32 bands when there are more)
+    void vocSetColumns (int c0, float l0, int c1, float l1)
+    {
+        auto st = vocState();
+        const auto columns = juce::jmin (st.bands, 32), per = juce::jmax (1, st.bands / juce::jmax (1, columns));
+        const auto step = c1 >= c0 ? 1 : -1;
+        for (int c = c0;; c += step)
+        {
+            const auto t = c1 == c0 ? 1.0f : (float) (c - c0) / (float) (c1 - c0);
+            for (int b = c * per; b < juce::jmin (st.bands, (c + 1) * per); ++b)
+                st.levels[(std::size_t) b] = l0 + (l1 - l0) * t;
+            if (c == c1)
+                break;
+        }
+        editSlot ([bytes = fvocoder::serialise (st)] (EffectSlot& target) { target.state = bytes; });
+    }
+    void vocDrag (const LayoutItem& item, juce::Point<float> p, bool first)
+    {
+        const auto columns = juce::jmin (vocState().bands, 32);
+        const auto c = vocColumnAt (item, p.x, columns);
+        const auto level = vocLevelAt (item, p.y);
+        vocSetColumns (first || vocLastColumn < 0 ? c : vocLastColumn, first ? level : vocLastLevel, c, level);
+        vocLastColumn = c;
+        vocLastLevel = level;
+        ui::postHint ({ vocHint (item, p), {}, false, false }, 1500);
+        repaint (rectOf (item).getSmallestIntegerContainer().expanded (1));
+    }
+    juce::String vocHint (const LayoutItem& item, juce::Point<float> p) const
+    {
+        const auto st = vocState();
+        const auto columns = juce::jmin (st.bands, 32), per = juce::jmax (1, st.bands / juce::jmax (1, columns));
+        const auto c = vocColumnAt (item, p.x, columns);
+        const auto band = c * per;
+        return tr ("Band {0} - {1}Hz  {2}%", { juce::String (band + 1), juce::String (juce::roundToInt (fvocoder::bandHz (st, band))),
+                                               juce::String (juce::roundToInt (st.levels[(std::size_t) band] * 100.0f)) });
+    }
+
     // --- the other displays -----------------------------------------------------------------------------
 
     // true = drawn (id is one of round 105's displays)
@@ -382,7 +470,7 @@
             paintRhythmPatterns (g, item);
             return true;
         }
-        if (id == "vocbands") // Fruity Vocoder: one column per band (FL animates their levels; LYNX shows the bands)
+        if (id == "vocbands") // Fruity Vocoder: one column per band, each with its live level (round 190ld, DP-32)
         {
             const auto bands = 4 << juce::jlimit (0, 5, juce::roundToInt (param01 ("Bands") * 5.0f));
             const auto shown = juce::jmin (bands, 32);
@@ -392,8 +480,19 @@
                 const auto cell = juce::Rectangle<float> (inner.getX() + w * (float) i, inner.getY(), w, inner.getHeight()).reduced (1.0f, 0.0f);
                 g.setColour (colour::bg2);
                 g.fillRect (cell);
+                // FL 2026 (capture 190ld B4, fl-vocoder-playing-*): a light fill per band rising with the band's level
+                // while the signal plays (LYNX: its curve colour, translucent); frozen while HOLD is held
+                if (const auto level = vocoderBandLevel (i); level > 0.0f)
+                {
+                    g.setColour (curveColour.withAlpha (0.42f));
+                    g.fillRect (cell.withTop (cell.getBottom() - cell.getHeight() * level));
+                }
+                // the band's level line (round 190oa, DP-33: the state's level; 1 = 0 dB at 68 % height, as before)
+                const auto st = vocState();
+                const auto per = juce::jmax (1, st.bands / shown);
+                const auto lvl = juce::jlimit (0.0f, 1.0f / vocUnityHeight, st.levels[(std::size_t) juce::jmin (fvocoder::maxBands - 1, i * per)]);
                 g.setColour (curveColour.withAlpha (0.8f));
-                g.fillRect (cell.withTop (cell.getY() + cell.getHeight() * 0.32f).withHeight (2.0f * s));
+                g.fillRect (cell.withTop (cell.getBottom() - cell.getHeight() * vocUnityHeight * lvl - 1.0f * s).withHeight (2.0f * s));
             }
             if (bands > shown)
             {

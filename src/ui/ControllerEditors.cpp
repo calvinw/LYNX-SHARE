@@ -1,4 +1,6 @@
 #include "ui/SlotWatch.h"
+#include "ui/HintBar.h"
+#include "ui/WindowPlaces.h"
 #include "ui/WindowOwner.h"
 #include "ui/ControllerEditors.h"
 
@@ -33,10 +35,16 @@ class Monitor final : public juce::Component
 public:
     void push (float v)
     {
+        // round 190ih (DP-67): a constant value repaints only until the trace has scrolled flat, and never while hidden
+        flatRun = v == history[(std::size_t) ((head + (int) history.size() - 1) % (int) history.size())] ? flatRun + 1 : 0;
         history[(std::size_t) head] = v;
         head = (head + 1) % (int) history.size();
-        repaint();
+        if (needsRepaint (flatRun, (int) history.size()) && isShowing())
+            repaint();
     }
+
+    // a trace whose every sample equals the last one looks the same after one more equal sample
+    static bool needsRepaint (int equalPushes, int length) noexcept { return equalPushes < length; }
 
     void paint (juce::Graphics& g) override
     {
@@ -68,7 +76,7 @@ public:
 
 private:
     std::array<float, 240> history {};
-    int head = 0;
+    int head = 0, flatRun = 0;
 };
 
 // ===================================================================================================
@@ -338,6 +346,9 @@ public:
     bool sustainable = true; // the point menu offers the sustain point
     float neutral = -1.0f;   // a map's neutral level (dashed line), < 0 = none
     std::function<float (float)> preview; // a faint wave behind the curve (the LFO page: -1 … 1 at time t)
+    // FL's Keyboard / Velocity mapping (manual, Fruity Envelope Controller): "the vertical white line on the graph shows
+    // the value of the last note/key received", in the axis' units (key / 120 or velocity 0 … 1); < 0 = none
+    std::function<float()> marker;
     float minSpan = 1.0f;                 // the time axis shows at least this much (one LFO cycle)
     bool showPreview = false;
 
@@ -451,17 +462,75 @@ public:
                 g.drawVerticalLine ((int) pt.x, area.getY(), area.getBottom());
             }
         }
+        // round 190oa (DP-71): FL's tension handle in the middle of each segment (drag up / down, Ctrl = fine,
+        // right-click = straight line)
+        for (int i = 0; i + 1 < c.count; ++i)
+            if (const auto h = handleAt (c, i); h.x >= 0.0f)
+            {
+                g.setColour (theme::colour::bg0);
+                g.fillEllipse (juce::Rectangle<float> (7.0f, 7.0f).withCentre (h));
+                g.setColour (i == bendSegment ? juce::Colour (0xffffa53c) : curveColour); // (capture 190oa C5: orange while dragged)
+                g.drawEllipse (juce::Rectangle<float> (7.0f, 7.0f).withCentre (h), 1.4f);
+            }
+        if (crosshair && dragged >= 0 && dragged < c.count) // (capture 190oa C5: a thin grey cross through the point)
+        {
+            const auto pt = juce::Point<float> (toX (c, c.time[(std::size_t) dragged]), toY (c.level[(std::size_t) dragged]));
+            g.setColour (theme::colour::textDisabled);
+            g.drawHorizontalLine ((int) pt.y, area.getX(), area.getRight());
+            g.drawVerticalLine ((int) pt.x, area.getY(), area.getBottom());
+        }
         if (live)
         {
             g.setColour (theme::colour::accent.withAlpha (0.7f));
             g.drawHorizontalLine ((int) toY (live()), area.getRight() - 14.0f, area.getRight());
         }
+        if (const auto x = markerX(); x >= 0)
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.9f));
+            g.drawVerticalLine (x, area.getY(), area.getBottom());
+        }
+    }
+
+    // the marker's pixel column, -1 = none (round 190ih, DP-68)
+    int markerX() const
+    {
+        if (! marker || axis == Axis::time)
+            return -1;
+        const auto v = marker();
+        if (v < 0.0f)
+            return -1;
+        const auto c = get();
+        return (int) std::floor (toX (c, juce::jlimit (0.0f, axis == Axis::keys ? 127.0f / 120.0f : 1.0f, v)));
+    }
+    // round 190ih (DP-70): the live parts repaint alone — the output tick at the right edge, or a marker column
+    void repaintLiveTick() { repaint (juce::Rectangle<int> (getWidth() - 26, 0, 26, getHeight())); }
+    void repaintColumn (int x)
+    {
+        if (x >= 0)
+            repaint (juce::Rectangle<int> (x - 1, 0, 3, getHeight()));
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
         const auto c = get();
         dragged = hit (c, e.position);
+        const auto handle = dragged < 0 ? hitHandle (c, e.position) : -1;
+        if (handle >= 0) // round 190oa (DP-71): a tension handle
+        {
+            if (e.mods.isPopupMenu()) // FL: "Right-click the handle to reset to a straight line"
+            {
+                auto v = c;
+                v.tension[(std::size_t) handle] = 0.0f;
+                set (v);
+                return;
+            }
+            bendSegment = handle;
+            bendStartY = e.position.y;
+            bendStart = c.tension[(std::size_t) handle];
+            fineFrom = { e.position.y, bendStart, e.mods.isCtrlDown() };
+            repaint();
+            return;
+        }
         if (e.mods.isPopupMenu())
         {
             if (dragged < 0) // round 165, FL: right-click adds a point there, dragged while the button is held
@@ -485,7 +554,10 @@ public:
             bendSegment = segmentAt (c, e.position.x);
             bendStartY = e.position.y;
             bendStart = bendSegment >= 0 ? c.tension[(std::size_t) bendSegment] : 0.0f;
+            fineFrom = { e.position.y, bendStart, e.mods.isCtrlDown() };
         }
+        if (dragged >= 0) // (FL's axis locks keep the point's position at the press)
+            pressed = { c.time[(std::size_t) dragged], c.level[(std::size_t) dragged] };
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
@@ -493,8 +565,18 @@ public:
         auto c = get();
         if (bendSegment >= 0 && bendSegment < c.count - 1)
         {
-            c.tension[(std::size_t) bendSegment] = juce::jlimit (-1.0f, 1.0f, bendStart + (e.position.y - bendStartY) / 120.0f);
+            // FL: "Hold CTRL during adjustment to fine tune" (a tenth of the speed, from where Ctrl went down)
+            const auto fine = e.mods.isCtrlDown();
+            if (fine != fineFrom.fine)
+                fineFrom = { e.position.y, c.tension[(std::size_t) bendSegment], fine };
+            // capture 190oa C5: 0.5 % a pixel (10 px up: 20 % -> 15 %), Ctrl ≈ 20× finer (0.025 %)
+            c.tension[(std::size_t) bendSegment] = juce::jlimit (-1.0f, 1.0f, fineFrom.value + (e.position.y - fineFrom.y) / (fine ? 4000.0f : 200.0f));
             set (c);
+            // FL's hint while it bends: "Point 2 to 3 tension 20.00%"
+            ui::postHint ({ tr ("Point {0} to {1} tension {2}%", { juce::String (bendSegment + 1), juce::String (bendSegment + 2),
+                                                                     juce::String (c.tension[(std::size_t) bendSegment] * 100.0f, 2) }),
+                            {}, false, false },
+                          1500);
             return;
         }
         if (dragged < 0 || dragged >= c.count)
@@ -502,15 +584,24 @@ public:
         const auto lo = dragged > 0 ? c.time[(std::size_t) dragged - 1] : 0.0f;
         const auto hi = dragged + 1 < c.count ? c.time[(std::size_t) dragged + 1] : (axis == Axis::time ? 1.0e6f : 1.0f);
         // the first point of a time curve stays at 0; a map's points move freely within 0..1
-        c.time[(std::size_t) dragged] = dragged == 0 && axis == Axis::time ? 0.0f : juce::jlimit (lo, hi, fromX (c, e.position.x));
-        c.level[(std::size_t) dragged] = juce::jlimit (0.0f, 1.0f, fromY (e.position.y));
+        // round 190oa (DP-71; capture 190oa C5, FL 2026): Shift or Ctrl while dragging a point keeps its level (it moves in
+        // time only, a crosshair through it) — FL 2026 does both the same (its manual gives Ctrl the other axis)
+        const auto keepLevel = e.mods.isShiftDown() || e.mods.isCtrlDown(), keepTime = false;
+        crosshair = keepLevel;
+        c.time[(std::size_t) dragged] = dragged == 0 && axis == Axis::time ? 0.0f
+                                        : keepTime                       ? juce::jlimit (lo, hi, pressed.x)
+                                                                         : juce::jlimit (lo, hi, fromX (c, e.position.x));
+        c.level[(std::size_t) dragged] = keepLevel ? pressed.y : juce::jlimit (0.0f, 1.0f, fromY (e.position.y));
         set (c);
     }
 
     void mouseUp (const juce::MouseEvent&) override
     {
+        if (bendSegment >= 0 || crosshair)
+            repaint();
         dragged = -1;
         bendSegment = -1;
+        crosshair = false;
     }
 
     void mouseDoubleClick (const juce::MouseEvent& e) override
@@ -602,6 +693,26 @@ private:
         return -1;
     }
 
+    // round 190oa (DP-71): the tension handle of segment i, on the curve half way between its points (x < 0: none,
+    // the points share a column)
+    juce::Point<float> handleAt (const ControllerCurve& c, int i) const
+    {
+        const auto x0 = toX (c, c.time[(std::size_t) i]), x1 = toX (c, c.time[(std::size_t) i + 1]);
+        if (x1 - x0 < 12.0f)
+            return { -1.0f, -1.0f };
+        const auto y0 = toY (c.level[(std::size_t) i]), y1 = toY (c.level[(std::size_t) i + 1]);
+        const auto k = c.tension[(std::size_t) i];
+        const auto shaped = k != 0.0f ? std::pow (0.5f, std::pow (2.0f, k * 3.0f)) : 0.5f;
+        return { x0 + (x1 - x0) * 0.5f, y0 + (y1 - y0) * shaped };
+    }
+    int hitHandle (const ControllerCurve& c, juce::Point<float> p) const
+    {
+        for (int i = 0; i + 1 < c.count; ++i)
+            if (const auto h = handleAt (c, i); h.x >= 0.0f && p.getDistanceFrom (h) < 6.0f)
+                return i;
+        return -1;
+    }
+
     int segmentAt (const ControllerCurve& c, float x) const
     {
         for (int i = 0; i + 1 < c.count; ++i)
@@ -630,12 +741,15 @@ private:
             });
             menu.addSeparator();
         }
-        menu.addItem (tr ("Right-click or double-click adds a point, drag moves it, Alt+click deletes it, Alt+drag bends a segment"), false, false, [] {});
+        menu.addItem (tr ("Right-click or double-click adds a point, drag moves it (Shift or Ctrl keeps its level), Alt+click deletes it; drag a segment's handle to bend it (Ctrl = fine, right-click = straight)"), false, false, [] {});
         menu.showMenuAsync (juce::PopupMenu::Options().withMousePosition());
     }
 
     int dragged = -1, bendSegment = -1;
     float bendStartY = 0.0f, bendStart = 0.0f;
+    struct FineFrom { float y = 0.0f, value = 0.0f; bool fine = false; } fineFrom; // (round 190oa: Ctrl = fine tension)
+    juce::Point<float> pressed;                                                   // the dragged point at the press
+    bool crosshair = false;                                                       // (FL's thin cross while an axis is kept)
 };
 
 // FL's X/Y modulation pad: drag the dot to set the global Mod X / Mod Y.
@@ -825,6 +939,14 @@ public:
         graph.live = [this] { return outputs[(std::size_t) shown]; };
         graph.active = [this] { return partActive(); };
         graph.emptyText = [this] { return emptyText(); };
+        graph.marker = [this] {
+            const auto [key, velocity] = lastNote();
+            if (shownPart == 2)
+                return key < 0.0f ? -1.0f : key / 120.0f; // (the keys axis: x = key / 120)
+            if (shownPart == 3)
+                return velocity;
+            return -1.0f;
+        };
         graph.preview = [this] (float t) -> float {
             const auto a = data()[(std::size_t) shown];
             const auto amp = controllerCurveAt (a.lfoAmp, t, 1.0f);
@@ -1056,6 +1178,7 @@ public:
             k->setBounds (pageKnobs.removeFromLeft (64));
         bottom.removeFromLeft (10);
         partInfo.setBounds (bottom);
+        markerShown = graph.markerX(); // (round 190ih: the graph is repainted whole at its new size)
     }
 
 private:
@@ -1199,6 +1322,7 @@ private:
         graph.sustainable = shownPart <= 1;
         refresh();
         resized();
+        markerShown = graph.markerX(); // (the whole graph repaints with the page)
     }
 
     void select (int k)
@@ -1270,10 +1394,35 @@ private:
 
     void timerCallback() override
     {
+        // round 190ih (DP-70): nothing repaints while hidden or while the outputs hold still (it was a full header +
+        // graph repaint at 30 Hz, idle or not)
+        if (! isShowing())
+            return;
+        auto changed = false;
         for (int k = 0; k < 8; ++k)
-            outputs[(std::size_t) k] = outputOf ? outputOf (k) : 0.0f;
-        repaint (getLocalBounds().withHeight (130));
-        graph.repaint();
+        {
+            const auto v = outputOf ? outputOf (k) : 0.0f;
+            changed = changed || v != outputs[(std::size_t) k];
+            outputs[(std::size_t) k] = v;
+        }
+        if (changed)
+        {
+            for (auto& t : tabs) // the meter under each tab
+                repaint (t.getBounds().withY (t.getBottom()).withHeight (8));
+            graph.repaintLiveTick();
+        }
+        // the last key / velocity received (outputs 8 / 9 of the controller): the white line on the mapping pages
+        if (const auto [key, velocity] = lastNote(); key != lastKey || velocity != lastVelocity)
+        {
+            lastKey = key;
+            lastVelocity = velocity;
+            if (const auto after = graph.markerX(); after != markerShown)
+            {
+                graph.repaintColumn (markerShown);
+                graph.repaintColumn (after);
+                markerShown = after;
+            }
+        }
         if (const auto held = engine.heldInputKeys(); held != heldKeys)
         {
             heldKeys = held;
@@ -1301,6 +1450,16 @@ private:
     juce::Slider lowKey, highKey;
     juce::Label keysLabel, links, partInfo;
     std::array<float, 8> outputs {};
+    float lastKey = -1.0f, lastVelocity = -1.0f;
+    int markerShown = -1;
+    // the last key / velocity the controller received (its outputs 8 / 9), -1 / -1 before a note
+    std::pair<float, float> lastNote() const
+    {
+        const auto key = outputOf ? outputOf (8) : -1.0f, velocity = outputOf ? outputOf (9) : -1.0f;
+        if (! (velocity > 0.0f)) // (no note yet, or no running controller: its outputs read 0)
+            return { -1.0f, -1.0f };
+        return { key, velocity };
+    }
 };
 
 // ===================================================================================================
@@ -1569,6 +1728,7 @@ void open (AudioEngine& engine, int track, int slot)
     open[key] = std::make_unique<FormulaWindow> (engine, track, slot,
                                                  tr ("Formula Controller") + " - " + (name.isNotEmpty() ? name : tr ("Insert {0}", { juce::String (track) }))
                                                      + " (" + tr ("slot {0}", { juce::String (slot + 1) }) + ")");
+    windowplaces::tag (*open[key], windowplaces::slotKey (track, slot)); // (round 190oa, DF-130: its place kept with the project)
 }
 
 void closeAll()

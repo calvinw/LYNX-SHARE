@@ -18,7 +18,9 @@
 #include <utility>
 
 #include "core/Adr.h"
+#include "core/AraLink.h"
 #include "core/MidiGenerateOptions.h"
+#include "core/NoteCurves.h"
 #include "core/VideoTrack.h"
 
 namespace lynx
@@ -175,8 +177,17 @@ enum class InstrumentKind : std::uint8_t
                    // samplePath, deck B's in zones[0].path
     fpc,           // FL's FPC (round 190q, core/Fpc.h, core/FpcInstrument.h): the kit's FL state in pluginState, the files of its
                    // layers in `zones` (one per layer with a sample, in the state's order; only `path` is used)
-    pocketSuperSaw // Pocket SuperSaw (round 190by, core/PocketSuperSaw.h): FL Studio Mobile's SuperSaw module; its 59
-                   // values 0…1 in modelParams (FLM's parameter k + 1 at index k)
+    pocketSuperSaw, // Pocket SuperSaw (round 190by, core/PocketSuperSaw.h): FL Studio Mobile's SuperSaw module; its 59
+                    // values 0…1 in modelParams (FLM's parameter k + 1 at index k)
+    tetra,          // Tetra (round 190hs, core/FmSynth.h): LYNX's own 4-operator FM synth (Live's Operator imports onto it);
+                    // its values in Operator's units in modelParams (fm::stateSize: parameters, then the user waves' partials)
+    helix,          // Helix (round 190ja, core/WavetableSynth.h): LYNX's own wavetable synth (Live's Wavetable imports onto it);
+                    // its values in Wavetable's units in modelParams (wt::stateSize: parameters, the two tables, the matrix)
+    braid,          // Braid (round 190ko, core/Braid.h): LYNX's own two-engine macro synth (Live's Meld imports onto it); its
+                    // values in Meld's units in modelParams (braid::stateSize: parameters, then the modulation matrix)
+    lynxModel       // LYNX Model (round 190ni, core/physmod/LynxModel.h): LYNX's own physical-modelling instrument (mallets on
+                    // a modal core: marimba, vibraphone, xylophone, glockenspiel, tubular bells, kalimba); its knobs in
+                    // modelParams (lm::stateSize, the units of lm::p), the instrument's fitted tables compiled in
 };
 
 // External plugin: format identifier (the app knows how to find the file) + saved state.
@@ -312,6 +323,17 @@ struct PluginRef
     // before), 1 as played, 2 soft, 3 hard, 4 fixed at `fixedVelocity` (1…127). core/Preferences.h mapPluginVelocity
     int velocityMode = 0;
     int fixedVelocity = 100;
+    // GitHub #198 (round 190ks): the notes the plugin plays from its own window (pads / keys clicked in it, sent on its MIDI
+    // output) are recorded on its channel while recording, as played notes; off: they are not. Projects saved before: on
+    bool recordOwnNotes = true;
+    // FL's wrapper Settings › GUI (round 190oh, P3; Fruity Wrapper's DFM VisualPanel, flags from FL 2026 saves with each
+    // box toggled [DATA]; FL's defaults [UI]): "DPI aware (requires reloading the plugin)" (wrapper flag 0x04000000, on):
+    // off = on Windows the plugin and its editor are made in a DPI-unaware context, so Windows draws the editor at 96 dpi
+    // and stretches it to the display's scale (for plugins that appear too big or too small); a change reloads the plugin
+    bool dpiAware = true;
+    // "Scale editor dimensions" (wrapper flag 0x40000000, off): the size the editor reports is taken in logical pixels
+    // (multiplied by the display's scale), for editors that appear cut off on a high-resolution screen
+    bool scaleEditorDimensions = false;
 
     bool operator== (const PluginRef& o) const
     {
@@ -325,7 +347,8 @@ struct PluginRef
                && processInactive == o.processInactive && inputs == o.inputs
                && allowHostKeys == o.allowHostKeys && hostKeysFirst == o.hostKeysFirst
                && detached == o.detached && playedBy == o.playedBy && values == o.values
-               && pinned == o.pinned && velocityMode == o.velocityMode && fixedVelocity == o.fixedVelocity;
+               && pinned == o.pinned && velocityMode == o.velocityMode && fixedVelocity == o.fixedVelocity
+               && recordOwnNotes == o.recordOwnNotes && dpiAware == o.dpiAware && scaleEditorDimensions == o.scaleEditorDimensions;
     }
 };
 
@@ -381,8 +404,9 @@ constexpr int stretchMethodCount = 7;
 //    its transients; beatsLoop = what fills the gap after a piece when the audio is slowed down: 0 nothing (silence),
 //    1 the piece again from its start, 2 back and forth; beatsEnvelope 0…100 = a fade over each piece (100: none).
 //  - Tones / Texture: the grain sizes (Live's numbers; LYNX scales its spectral block by size / default).
-//  - textureFlux, proFormants, proEnvelope, complexPro: kept so a Live set goes back out as it came in; LYNX has no
-//    engine for them (Texture's random grain variation, Complex Pro's formant keeping): they do not change the sound.
+//  - textureFlux, proFormants, proEnvelope, complexPro: Texture's grain scatter and Complex Pro's formant keeping. Round
+//    190ik (warpLaw Measured) renders them (core/WarpEngines); with warpLaw Classic they are only kept so a Live set goes
+//    back out as it came in.
 struct WarpModeSettings
 {
     static constexpr int preserveTransients = 6;
@@ -402,8 +426,17 @@ struct WarpModeSettings
     // Round 190gx: Beats' law. Measured (the default: new channels, .als / .flp imports) = Live 12.4's fill, Transient
     // Envelope and cut laws measured on its renders; Classic = how LYNX rendered Beats before 190gx, kept bit for bit for
     // projects saved before then (engine/ProjectFile.cpp: a project without the "beatsLaw190gx" mark loads Classic).
-    static constexpr std::uint8_t beatsLawClassic = 0, beatsLawMeasured = 1;
-    std::uint8_t beatsLaw = beatsLawMeasured;
+    // Round 190ik adds PitchAware (the new default): Measured with the pitch-aware transient detector (legato pitch steps
+    // cut, glides and vibrato do not); a project saved before 190ik keeps Measured (engine/ProjectFile.cpp, mark
+    // "warpLaw190ik").
+    static constexpr std::uint8_t beatsLawClassic = 0, beatsLawMeasured = 1, beatsLawPitchAware = 2;
+    std::uint8_t beatsLaw = beatsLawPitchAware;
+    // Round 190ik: Texture's and Complex Pro's engines. Measured (the default) = Texture granular with Grain Size and Flux,
+    // Complex Pro's transposition rendered offline with its Formants and Envelope (core/WarpEngines, fitted on Live 12.4's
+    // renders); Classic = how LYNX rendered them before 190ik (Texture = the spectral stretcher, Complex Pro = Complex with
+    // the clip's pitch shifted in real time), kept bit for bit for projects saved before then.
+    static constexpr std::uint8_t warpLawClassic = 0, warpLawMeasured = 1;
+    std::uint8_t warpLaw = warpLawMeasured;
     bool operator== (const WarpModeSettings&) const = default;
 };
 
@@ -458,7 +491,8 @@ struct SamplerSettings
     StretchMethod stretchMethod = StretchMethod::general; // with keepPitch: the stretcher's preset
     int flStretchMode = 0;     // FL's own mode from an imported .flp (0 = none known): the export writes it back
     int flStretchPitch = 0;    // the part of `pitch` that came from FL's stretch PITCH knob (cents): it goes back there
-    float stretchPitch = 0.0f; // Beats: semitones each piece is resampled by, offline (a Live clip's transpose; round 175a)
+    float stretchPitch = 0.0f; // Beats: semitones each piece is resampled by, offline (a Live clip's transpose; round 175a);
+                               // Complex Pro / Texture (warpLaw Measured, round 190ik): the transposition rendered offline
     // audio clips, round 190ds (core/KeyFollow.h): the musical key of the audio (a loop's key read from its name or
     // detected), −1 = not known; minor = the key is minor; how it was found (0 none, 1 the file's name, 2 detected from
     // the audio, 3 set by the user)
@@ -470,11 +504,19 @@ struct SamplerSettings
     // rest of the stretch). Fewer than 2 markers, or markers in a straight line: one speed (round 175a, M1)
     std::vector<WarpPoint> warp;
     WarpModeSettings warpModes; // round 190fm: the warp mode's own settings (Live's Preserve, loop mode, grain...)
-    // outside Beats nothing renders stretchPitch offline: it moves to the Pitch knob (-24..24), so the sample stays at its
+    // Whether the warp mode renders stretchPitch offline: Beats, and under warpLaw Measured (round 190ik) Complex Pro (its
+    // formants are kept, which the real-time shifter cannot do) and Texture (its grains resampled, as Live's)
+    bool bakesPitch() const noexcept
+    {
+        const auto measured = warpModes.warpLaw >= WarpModeSettings::warpLawMeasured;
+        return stretchMethod == StretchMethod::beats || (stretchMethod == StretchMethod::texture && measured)
+               || (stretchMethod == StretchMethod::complex && warpModes.complexPro && measured);
+    }
+    // outside those nothing renders stretchPitch offline: it moves to the Pitch knob (-24..24), so the sample stays at its
     // pitch. True if it moved.
     bool moveBakedPitchToKnob() noexcept
     {
-        if (stretchPitch == 0.0f || (stretchMethod == StretchMethod::beats && keepPitch))
+        if (stretchPitch == 0.0f || (keepPitch && bakesPitch()))
             return false;
         pitch = std::clamp (pitch + stretchPitch, -24.0f, 24.0f);
         stretchPitch = 0.0f;
@@ -541,6 +583,14 @@ struct SamplerSettings
     // every sample in memory (it streams files over 30 s from its disk cache by itself), resamples in real time, and its
     // sampler does not play the file's regions or ACID markers itself, so they change nothing audible in LYNX.
     bool keepOnDisk = false, resampleOnLoad = false, loadRegions = true, loadSliceMarkers = false;
+    // Round 190lq (issue #204): how an audio clip channel plays its NOTES (steps, Piano roll notes, keys). FL's law (the
+    // default: new channels, .flp imports): a note plays as the channel's Sampler note would (FL 2026's renders of the
+    // two are bit-identical) — the whole clip whatever the note's length, overlapping notes layer, the key transposes it
+    // from C5 (the channel's root note), the Sampler's velocity law. Legacy: how LYNX played them before 0.1.30 (each
+    // note cut at its own end, every key at the clip's own pitch), kept for audio clip channels of projects saved before
+    // the "clipNotes190lq" mark (engine/ProjectFile.cpp) so they sound as they did.
+    // Playlist audio clips are not notes: this changes nothing for them.
+    bool clipNoteLegacy = false;
 
     bool operator== (const SamplerSettings&) const = default;
 };
@@ -934,12 +984,15 @@ struct LayerSettings
 // The FL plugin an imported channel generator or mixer effect came from (round 171e, Export to FL Studio): its internal
 // name (.flp 0xC9) and saved state (0xD5; empty = the same as the channel's pluginState), and a fingerprint of what the
 // import made of it (flpexport::fingerprint). While the LYNX side is unchanged (the same fingerprint), Export to FL
-// Studio writes the original plugin back byte for byte. Saved with the project.
+// Studio writes the original plugin back byte for byte. Saved with the project. `trialSaved`: FL saved the plugin while
+// it was a trial there (its record's flag 0x80, issue #282); the export keeps that mark with the plugin, so an FL that
+// still has it as a trial keeps it locked, as it does with FL's own trial saves.
 struct FlOrigin
 {
     std::string plugin;
     std::vector<std::uint8_t> state;
     std::uint64_t fingerprint = 0;
+    bool trialSaved = false;
 
     bool empty() const noexcept { return plugin.empty(); }
     bool operator== (const FlOrigin&) const = default;
@@ -999,6 +1052,12 @@ struct ChannelDef
     std::vector<float> modelParams; // instrument == sakura / drumpad / boobass / drumsynth / harmless: FL's raw state parameters
                                     // instrument == minisynth: { 1 } = FL Studio Mobile's build of the engine (core/MiniSynth.h)
     std::vector<std::uint8_t> pluginState; // instrument == sytrus / harmor / ogun / gms / morphine / fruitkick / bassdrum: the FL plugin's saved state (record 0xD5)
+    // The native engine's revision for this channel (round natives190kj): a project saved before it loads with 0 and
+    // plays as it did; new channels and FL imports get the current one. Harmor: 1 = resynthesis (a sample in the IMG
+    // section) played as FL plays it (0: such a part plays its timbres, as LYNX did before). SimSynth: 2 = the note
+    // velocity reaches its level through FL's Init.Vol law (round 190om; 0 and 1: every note at full level, as before).
+    // Harmor 3 (round 190pr): automation of its filter frequencies and Mod X / Y / Z moves them as in FL (before: ignored).
+    int engineRev = 3;
     SamplerSettings sampler; // used when instrument == sampler
     SynthSettings synth;     // used when instrument == synth
     float swingMix = 1.0f;   // how much of the global swing applies to this channel (0..1), as in FL
@@ -1023,6 +1082,9 @@ struct ChannelDef
     // FL's "Lock active/mute state" (the mute switch's menu, .flp 0x20, REA_rodada167l §5): soloing another channel
     // leaves this one as it is
     bool soloLock = false;
+    // FL's "Zip selected" (Alt+Z, the Channel rack's Options menu; round 190mk, core/RackZip.h): the row is shown as a
+    // thin bar in a shared strip. View only (the sound is untouched); saved in .lynx ("zipped")
+    bool zipped = false;
     // FL's key region (the Channel settings keyboard's ruler, REA_rodada164a §2): the channel plays only the notes
     // from keyLow to keyHigh (MIDI keys); 0…127 = every note. Layer's "Split children" sets one key per child.
     int keyLow = 0, keyHigh = 127;
@@ -1036,9 +1098,19 @@ struct ChannelDef
     std::uint64_t uid = 0;
     std::vector<StandIn> standIns;
     FreezeState freeze; // (round 190ay) frozen: its stems play, its instrument is not loaded
+    // LYNX extra, round 190op (P4, owner decision O-3): "Deactivate". The channel's instrument / plugin is not loaded and
+    // the channel makes no sound (nothing is rendered, unlike Freeze); its settings, plugin state and notes stay here as
+    // they were, so Reactivate loads the same sound again (core/TrackStates.h deactivate::project). Saved ("deactivated").
+    bool deactivated = false;
     // FL's channel icon (.flp 0x9B, REA round 168j): FL's icon index, 0 = none. Kept and saved; drawn by the icon UI.
     int icon = 0;
     int flWrapperFlags = -1; // an imported .flp channel's plugin record flags (0xD4 +16, 0x20 = Smart disable): back in the export
+    // FL's generator "Smart disable" (the plugin menu's CPU › Smart disable; REA round 190of: FLEngine FUN_00cf35a0), for a
+    // hosted instrument (round 190ok, owner decision D2): on = the plugin is not called while it has no events and its
+    // output has been under -96 dB for 4 s (core/GeneratorSmartDisable.h). FL's default for a new generator is off; an
+    // .flp import takes the channel's 0xD4 bit 0x20 (kept in step with flWrapperFlags); a project saved before round
+    // 190ok has it off (it plays as it did). Native engines keep their own lossless idle skip.
+    bool smartDisable = false;
     // FL's plugin menu › Scaling (round 190he, core/EditorScale.h): the size of the channel's settings window, a
     // percentage of FL's size; 0 = LYNX's default (125 %)
     int editorScale = 0;
@@ -1063,11 +1135,28 @@ struct ChannelDef
         bool operator== (const SimplePad&) const = default;
     };
     SimplePad simplePad;
+    // Round 190kx (core/AraLink.h): an audio clip channel edited in an ARA 2 plugin (Melodyne...); empty = not
+    AraLink ara;
+    // Round 190lk (core/PolyEdit.h): an audio clip channel's notes edited in LYNX's polyphonic note editor (the analysis
+    // and the edits, "LXPE"); its clips play the edited render of the sample. Empty = not edited.
+    std::vector<std::uint8_t> polyEdit;
+    // Round 190pf (research190oe P13, core/ChordLane.h): the channel's notes follow the Chord lane while the song plays
+    // (Cubase's Chord Track "Follow", Studio Pro's "Follow chords"; a LYNX extra): 0 off (every project saved before),
+    // 1 chord tones (each note moves to the nearest note of the chord under it), 2 bass (to the chord's bass / root).
+    // The pattern keeps its notes; only what plays moves. Saved as the channel's "followChords" when not 0.
+    std::uint8_t followChords = 0;
     InstanceTag instance; // runtime identity of the channel (never saved)
 
     bool hasKeyRegion() const noexcept { return keyLow > 0 || keyHigh < 127; }
     bool inKeyRegion (int key) const noexcept { return key >= keyLow && key <= keyHigh; }
     bool operator== (const ChannelDef&) const = default;
+    // round 190ok: switches FL's generator smart disable, keeping an imported channel's FL flags in step (the .flp export)
+    void setSmartDisable (bool on) noexcept
+    {
+        smartDisable = on;
+        if (flWrapperFlags >= 0)
+            flWrapperFlags = on ? (flWrapperFlags | 0x20) : (flWrapperFlags & ~0x20);
+    }
 };
 
 enum class EffectKind : std::uint8_t
@@ -1223,10 +1312,15 @@ enum class EffectKind : std::uint8_t
     // --- end of round 190dw
     rackMixer,       // a rack chain's mixer (round 183c, core/Rack.h): volume (Live's chain taper), pan, chain-select gain; inside racks only
     edison,          // FL's Edison (round 190cd, core/EdisonFx.h): an audio editor in the slot — records the slot's input, plays into it; its audio in samplePath
-    anvilBus         // LYNX's drum-bus processor (round 190fk, core/AnvilBus.h): drive (3 types), crunch, damp, transients, boom, comp; Live's Drum Buss imports onto it
+    anvilBus,        // LYNX's drum-bus processor (round 190fk, core/AnvilBus.h): drive (3 types), crunch, damp, transients, boom, comp; Live's Drum Buss imports onto it
+    corrode,         // LYNX's degrader (round 190kk, core/Corrode.h): a short delay moved by a sine or band-passed noise; Live's Erosion imports onto it
+    soundboard,      // LYNX's resonant body (round 190kk, core/Soundboard.h): a bank of tuned modes laid out as 7 objects; Live's Corpus imports onto it
+    platter,         // LYNX's record-wear effect (round 190kk, core/Platter.h): tracing / pinch distortion on a band, crackle; Live's Vinyl Distortion imports onto it
+    timeprism,       // LYNX's spectral freezer and delay (round 190ko, core/Timeprism.h); Live's Spectral Time imports onto it
+    harmonia         // LYNX's spectral resonator (round 190ko, core/Harmonia.h): a bank of partials the input's spectrum excites; Live's Spectral Resonator imports onto it
 };
 // the last EffectKind (loops over every kind; update when one is appended)
-constexpr EffectKind lastEffectKind = EffectKind::anvilBus;
+constexpr EffectKind lastEffectKind = EffectKind::harmonia;
 
 // round 165x: 160 → 192 (Ember had reached 160; a slot's parameters are 768 bytes, project files store only an engine's
 // own count, so older projects load unchanged). Round 150: 128 → 160 (Prism Multiband 155, Ember 133).
@@ -1271,6 +1365,13 @@ struct EffectSlot
     std::vector<EffectBranch> branches;           // used when kind == parallel
     std::vector<EffectLink> links;                // used when kind == parallel
     std::vector<std::uint8_t> state;              // FL's raw plugin state, for exact effects built from it (vocodex, maximus)
+    // The engine revision of this slot's built-in effect (round 190kz, as ChannelDef::engineRev): a project saved before
+    // loads with 0 and plays exactly as before; new slots and FL imports get the current one. Maximus: 1 = its gain
+    // smoothers keep their state in double precision instead of the x87 unit's (FL's own arithmetic; the same samples
+    // on every demo state measured, the old law stays for old projects). 2 (round 190ok, owner decision D3, through the
+    // plugin quality gate): LYNX's own devices compute their per-sample tanh / exp / log / pow / sin with core/FastMath.h
+    // (Effect::setEngineRev; a project saved with 0 or 1 keeps the C library's results, bit for bit).
+    int engineRev = 2;
     std::string samplePath;                       // audio file the effect plays (Newtone/Newtime source sample); "" = none
     // When set (id or foreign), this built-in effect is a LYNX substitute for that missing third-party plugin
     // (core/PluginSubstitutes.h): the original reference is kept byte for byte, saved with the project, and the slot
@@ -1295,6 +1396,18 @@ struct EffectSlot
     // every layout, the Mixer and the exports see a normal effect. Saved in .lynx.
     std::uint8_t goal = 0;
     float goalAmount = 0.5f;
+    // Which view the editor's display shows, per slot (round 190jd; 0 = the default). Fruity Limiter: 0 = FL's scrolling
+    // analysis graph, 1 = LYNX's transfer curve with its grid and level trail. Saved in .lynx ("displayView"); FL's .flp
+    // has no such setting. Editor only: the audio never reads it.
+    std::uint8_t displayView = 0;
+    // FL's "Lock/Unlock State" on the slot LED (Shift+click, manual "Mute/Disable LED - The same as for the Mixer Track
+    // mute LEDs", round 190ld): soloing another slot of the insert (Ctrl/Alt+click) leaves this one as it is. Saved only
+    // when on ("lockState"); FL's .flp keeps it in the UI state only.
+    bool lockState = false;
+    // Round 190oq (issue #243, core/AraRegions.h): an ARA plugin in this slot plays and edits the audio clips of the
+    // audio clip channels routed to this mixer track (as REAPER / Logic / Studio One host ARA on a track insert). Saved
+    // only when on ("ara"); FL hosts no ARA (an FL import never has it).
+    bool ara = false;
     FlOrigin flOrigin;    // imported from FL: the original effect plugin (round 171e)
     InstanceTag instance; // runtime identity of the slot (never saved, not compared)
 
@@ -1538,6 +1651,10 @@ enum class OutputMode : std::uint8_t
 constexpr int outputDefault = -2; // Master: the device's first output pair; inserts: none (they reach it via the Master)
 constexpr int outputNone = -1;    // no hardware output (the Master too)
 
+// Live's Crossfade Assign buttons (round 190kc, Clip-launch layout; core/Crossfader.h). The values are those of the
+// set's Mixer/CrossFadeState (0 = A, 1 = none, 2 = B [DATA: every Live 12 set]).
+enum class CrossfadeAssign : std::uint8_t { a, none, b };
+
 struct MixerTrack
 {
     std::string name;
@@ -1545,9 +1662,15 @@ struct MixerTrack
     float pan = 0.0f;          // -1..1
     bool muted = false;
     bool solo = false;
+    // Round 190nc (DL-110, Live's Solo/Cue): the track's Cue switch (Live's headphone button in Cue mode): its output is
+    // heard through the Cue Out too, at the Cue Volume (core/SessionMixer.h cueActive; Live 12 manual 18.6)
+    bool cue = false;
     // with solo: the tracks that feed this one are heard too (LYNX's solo switch, FL's "Alt solo"); off = FL's "Solo
     // selected track(s)": only this track and its path to Master (REA_rodada167l §4)
     bool soloSources = true;
+    // FL's "Lock/Unlock State" (Shift+click on the mute switch, round 190kn): a solo elsewhere doesn't silence this track,
+    // and "Unmute all" leaves its mute as it is
+    bool lockState = false;
     std::vector<EffectSlot> effects; // up to maxEffectSlots, processed in order
     bool toMaster = true;            // inserts: output to Master (besides the sends)
     float masterLevel = 1.0f;        // level of that route to Master (linear gain, 0..maxFaderGain; FL's route knob)
@@ -1617,6 +1740,32 @@ struct MixerTrack
     // The chain preset ("sound") last put on this insert (core/ChainPresets.h; "" = none). A name only: the slots are
     // the chain. Saved.
     std::string chainPreset;
+    // The Simple dock's Controls tab (round 190ke, core/SmartControls.h): the user's own mapping of its eight knobs,
+    // encoded by smartcontrols::encode ("" = LYNX's default mapping for the track's instrument and chain). Saved.
+    std::string smartControls;
+    // Live's return tracks (round 190kc, the Clip-launch layout; core/SessionMixer.h). A return is an insert like any
+    // other (the engine routes it as one); the flag makes the Session mixer show it as a return strip (A, B …: its
+    // letter is its place among the returns) and give every track a Sends row for it, as Live does. Set by the .als
+    // import and by Create › Insert Return Track. Saved.
+    bool liveReturn = false;
+    // FL's "Current" (C) mixer track (round 190mv, DF-82; capture 190mv A1): a utility track that takes in the selected
+    // track's output in line — its effects and EQ process what the selected track sends on (FL's manual: "If you add FX
+    // or change the EQ levels of the 'Current (C)' track these will apply to any selected track"), its meter shows the
+    // result. At most one, kept as the last mixer track (mixerops::currentTrack), with no inputs, routes or fader of its
+    // own; the mixer draws it as a meter-only strip left of the Master. Made when it is first clicked. Saved.
+    bool current = false;
+    // LYNX extra, round 190op (P4, owner decision O-3): "Deactivate". The insert's effects are not loaded and it carries
+    // silence (its sends and sidechains too; the routing stays); so does whatever plays only into it (core/TrackStates.h
+    // deactivate::effective). The effects' settings stay as they were. Saved ("deactivated").
+    bool deactivated = false;
+    // A return's Pre / Post toggle (Live's SendsPre, per return): on, every send into it leaves before the sending
+    // track's fader (MixerSend::pre); new sends take it. Saved.
+    bool returnPre = false;
+    // A return's sends to returns that are switched on (Live: "the Send controls in Return tracks are disabled by
+    // default"; Enable Send / Enable All Sends). Targets (inserts). Saved.
+    std::vector<int> returnSendsOn;
+    // Live's Crossfade Assign (round 190kc): the crossfader fades this insert at its gain stage. Saved when not none.
+    CrossfadeAssign crossfade = CrossfadeAssign::none;
     bool operator== (const MixerTrack&) const = default; // (Online Sessions P2: entity comparison, round 169b)
 };
 
@@ -1637,6 +1786,29 @@ struct Vca
     bool operator== (const Vca&) const = default;
 };
 
+// A mix snapshot (round 190hp, slice B16 of the 0.1.28 pain report, complaint #30; LYNX's own: FL keeps one insert's
+// state in a file, Mixer states, and the reference DAW has no snapshots either). The Mixer menu's "Mix snapshots
+// (LYNX)" takes one (every insert's fader, pan, separation, mute, its route to the Master and its sends) and recalls it
+// in one undo step; "Compare A/B" goes back to the snapshot recalled before. Insert numbers follow the mixer's
+// reordering (mixerops' remap); an insert deleted since is skipped. At most maxMixSnapshots per project. Saved.
+struct MixSnapshot
+{
+    struct Insert
+    {
+        int track = 0; // 0 = Master
+        float volume = unityFader, pan = 0.0f, stereo = 0.0f;
+        bool muted = false;
+        bool toMaster = true;
+        float masterLevel = 1.0f;
+        std::vector<MixerSend> sends;
+        bool operator== (const Insert&) const = default;
+    };
+    std::string name;
+    std::vector<Insert> inserts;
+    bool operator== (const MixSnapshot&) const = default;
+};
+constexpr int maxMixSnapshots = 16;
+
 struct Note
 {
     std::int64_t start = 0;   // ticks
@@ -1649,12 +1821,21 @@ struct Note
     bool muted = false;       // disabled note (does not play, stays in the pattern)
     bool slide = false;       // glides the sounding note to this pitch (without retriggering), as in FL
     bool porta = false;       // inverts the channel's porta on this note (the note glides from the previous one; as in FL)
+    // FL's step note on a generator (round 190oz, REA_rodada190oz §5): an .flp note of length 0 on a plugin / native
+    // generator channel. FL sends its note-off only when the channel's next note starts (ScheduledNotes), so the last
+    // one sounds on until the instrument ends it. It keeps one step of length for the editors; once that length is
+    // changed it plays as an ordinary note (heldStep()).
+    bool held = false;
     // release velocity 0..1 (FL's "Note release"): the note's "off" carries it to the instruments that take one — hosted
     // plugins (FL's wrapper "Send note release velocity"), a Patcher's and a VFX's voices
     float release = 0.5f;
     float modX = 0.5f, modY = 0.5f; // two free per-note modulation values 0..1 (stored, not yet routed)
     int colour = 0;           // note colour group 0..15 (FL's note colours; .flp note byte 'extra' bits 0-3)
     int group = 0;            // note group (FL's Group, Shift+G: clicking one note selects the group); 0 = none
+    // FL's note repeat (issue #208; the Channel Rack graph editor's "Repeat" lane and the Piano roll's note properties,
+    // .flp note byte 0x11): 0 = none, 1..14 = the index of FL's repeat rate (core/NoteRepeat.h: 1/4 beat ... 1/64
+    // triplet); the note is struck again at that rate while it lasts
+    int repeat = 0;
     // Live 12's note Chance and Velocity Range (round 187c, LYNX additions; FL has neither; core/NoteChance.h): each time
     // the note comes round it plays with this probability (0..1, .als Probability), at a velocity drawn evenly between
     // `velocity` and `velocity + velocityRange` (-1..1 = Live's VelocityDeviation / 127). Drawn from Song::chanceSeed,
@@ -1666,6 +1847,11 @@ struct Note
     int chanceGroup = 0;
     bool chanceOne = false;
     bool hasChance() const noexcept { return chance < 1.0f || velocityRange != 0.0f || chanceGroup != 0; }
+    bool heldStep() const noexcept { return held && length == ticksPerStep && ! slide; }
+    // MPE stage 2 (issue #108, core/NoteCurves.h): the note's own pitch bend / timbre / pressure curves while it sounds
+    // (recorded from an MPE controller, drawn in the Piano roll's MPE lanes, Live's per-note expression); none = the
+    // note plays its fine pitch, Mod X and Mod Y alone, as before
+    NoteCurvesRef curves;
     bool operator== (const Note&) const = default; // (Online Sessions P2: entity comparison, round 169b)
 };
 
@@ -1691,7 +1877,11 @@ enum class AutomationTargetKind : std::uint8_t
     vcaLevel,      // index = VCA (Song::vcas): its fader (round 177a; LYNX's own, FL has no VCA)
     // index = channel, param = which Levels adjustment (round 190dz): FL's channel parameter 0x10 + param —
     // 0 pan (0…1 = −1…1), 1 volume (0…1 = 0…200 %, FL's whole 0…25600 travel), 3 Mod X, 4 Mod Y (0…1 = −1…1)
-    channelAdjust
+    channelAdjust,
+    // Live's crossfader (round 190kc, the Main track's CrossFade): 0..1 = left..right (Song::crossfader -1..1)
+    crossfader,
+    // index = modulator (Song::modulators): a Macro modulator's knob (round 190ox; LYNX's own). 0..1 = its value
+    modulatorMacro
 };
 
 namespace leveladjust
@@ -1770,6 +1960,10 @@ struct Marker
                          patternLength = 6, barOverride = 7, timeSignature = 8, punchIn = 9, punchOut = 10,
                          loopLength = 11, keyScale = 12;
     static constexpr int songStart = start; // (round 165m's name) Performance mode's zone ends here
+    // A Key/Scale marker's key (round 190nu, core/KeyRegions.h; FL .flp 0x2E root, 0xA8 scale): an index into
+    // notetools::flReferenceScales() (`keyFlScale`), −1 FL's Default (the Piano roll's own scale from here), −2 Black notes (no scale)
+    int keyRoot = 0;
+    int keyFlScale = -2;
 
     bool isSignature() const noexcept { return numerator > 0; }
     bool operator== (const Marker&) const = default;
@@ -1786,14 +1980,24 @@ struct Pattern
     // end (polyrhythms). The loop points stay stored while it is off.
     bool loopOn = false;
     RackLoopMode loopMode = RackLoopMode::steps;
+    // LYNX extra, round 190ne (0.1.31, core/TrackClips.h): a track clip, a pattern that belongs to one own-clips
+    // instrument track (PlaylistTrack::ownClips). It stays out of the pattern selector, sits in the Picker's folded
+    // "Track clips" group, and goes when its last clip goes. false = every FL pattern and every pattern saved before. In
+    // the padding after loopMode: Pattern keeps its size.
+    bool trackClip = false;
     std::vector<ChannelLoop> channelLoops; // at most one per channel
     std::uint64_t uid = 0; // stable id (Online Sessions, round 168a)
     // FL's pattern time markers (the Piano roll's ruler; .flp 0x94 / 0x21 / 0x22 / 0xCD inside the pattern's events,
     // round 168g): plain markers, time signature changes, Loop length (11), Pattern length (6)... sorted by tick
     std::vector<Marker> markers;
     std::string loopStarterGenre; // FL's Loop Starter genre of this pattern (round 168b); "" = no Loop Starter
+    // FL's steps and notes of the automation clip channels (round 190ow, details DE-123; core/RackAutomation.h): each one
+    // starts its automation clip from the clip's start and plays it while the note is held (FL's manual, "Triggering").
+    // Note::channel is the index into Song::automations, never a channel; sorted by start. Kept apart from `notes`, so
+    // no channel code (steps, Piano roll, scheduler, exports) meets an automation index. Empty = every pattern as before.
+    std::vector<Note> autoNotes;
 
-    void sortNotes();
+    void sortNotes(); // (autoNotes too)
     std::int64_t effectiveLength (Meter meter) const noexcept; // (no length: whole bars of the song's meter)
 
     bool hasStep (int channel, int step) const noexcept;
@@ -1801,6 +2005,10 @@ struct Pattern
     // Channel Rack option "Mute removed steps") mutes them; turning it on with `muteRemoved` unmutes them, data and all,
     // without it adds a new note (as FL's SetStep, REA round 169f: a muted note there is left alone).
     void toggleStep (int channel, int step, bool muteRemoved = false);
+    // the same for automation `automation`'s step on its automation clip row (round 190ow; autoNotes, no mute option:
+    // FL's automation clip channels have no "Mute removed steps" state worth keeping)
+    bool hasAutoStep (int automation, int step) const noexcept;
+    void toggleAutoStep (int automation, int step);
     bool operator== (const Pattern&) const = default;
 };
 
@@ -1916,18 +2124,52 @@ struct Automation
     {
         AutomationTarget target;
         std::string formula; // over `Input` (core/LinkFormula.h); "" = 1:1
+        // Round 190ov: the target's own value scale after the formula — FL's normalised value of the control (what an FL
+        // automation clip with several links sends each of them) → the target's 0..1 in LYNX, sampled evenly over 0..1
+        // and read with linear interpolation. Empty = the same scale (every LYNX-made link, and FL controls LYNX keeps on
+        // FL's scale). Set by the .flp import for a control whose LYNX equivalent counts differently (a mapped effect
+        // parameter, the tempo of a clip without a range).
+        std::vector<float> scale;
+        float scaled (float v) const noexcept; // `v` through `scale` (clamped to 0..1; v itself when there is none)
         bool operator== (const Link&) const = default;
     };
     std::vector<Link> links;
+    // The clip's colour in the Playlist, ARGB (round 190ig): FL draws an automation clip in its Automation Clip channel's
+    // colour (the .flp's channel colour event 0x80, read on import and written back). 0 = none set: drawn in FL's default
+    // channel colour #485156, as FL draws a channel saved without a colour.
+    std::uint32_t colour = 0;
+    // Round 190hq (core/TempoMarkers.h): this tempo automation is the Playlist ruler's tempo markers (LYNX extra; saved as
+    // "tempoMarkers", which older LYNX releases ignore: they play it as the plain tempo clip it is)
+    bool tempoMarkers = false;
     bool isLive() const noexcept { return source.track >= 0 || source.channel >= 0; }
     std::uint64_t uid = 0; // stable id (Online Sessions, round 168a)
+    // FL's automation clip channel in the Channel rack (round 190oo, design review 2 PAT-7; core/RackAutomation.h): the
+    // clip's row sits above channel row `rackSlot` (FL's channel order of an imported .flp); −1 = after the last channel
+    // (a clip made in LYNX, and every clip of a project saved before round 190oo). Saved as "rackSlot" when set.
+    int rackSlot = -1;
+    // FL's automation clip MIN / MAX (round 190ow, PAT-7: its channel's pan knob = minimum, volume knob = maximum, the
+    // rack row's two knobs; the .flp levels of 12800, REA_rodada171e): "a scaling factor that re-ranges the output" while
+    // the points stay as drawn. `pointsMin` / `pointsMax` = the range the point values were written in (an imported FL
+    // clip's levels, LYNX's whole 0..1 otherwise); while the knobs equal them nothing is re-ranged (playAt as before, the
+    // same bits), else the played value is moved from that range into rangeMin..rangeMax. Saved when not 0 / 1.
+    float rangeMin = 0.0f, rangeMax = 1.0f;
+    float pointsMin = 0.0f, pointsMax = 1.0f;
+    // FL's mute light of the automation clip channel (round 190ow; .flp channel event 0x00): a muted clip drives
+    // nothing, neither from the Playlist nor from its steps. Saved as "muted" when set.
+    bool muted = false;
+    bool reranged() const noexcept { return rangeMin != pointsMin || rangeMax != pointsMax; }
+    float rerange (float v) const noexcept; // a played value from pointsMin..pointsMax into rangeMin..rangeMax
     float mapLive (float v) const noexcept; // applies the curve
 
     // Value at `tick` (before the first point = first value; after the last = last).
     float valueAt (double tick) const noexcept;
     // What plays at `tick` of the automation (clip time, offset included) at song position `songTick`: valueAt plus
     // the LFO when it is on.
-    float playAt (double tick, double songTick) const noexcept { return lfo.on ? lfo.apply (valueAt (tick), tick, songTick) : valueAt (tick); }
+    float playAt (double tick, double songTick) const noexcept
+    {
+        const auto v = lfo.on ? lfo.apply (valueAt (tick), tick, songTick) : valueAt (tick);
+        return reranged() ? rerange (v) : v; // (round 190ow: the MIN / MAX knobs)
+    }
     std::int64_t length() const noexcept; // tick of the last point (minimum 1)
     bool operator== (const Automation&) const = default;
 };
@@ -1942,8 +2184,27 @@ struct ModRoute
 {
     AutomationTarget target;
     float depth = 0.25f; // -1..1 of the target's whole range
+    // Round 190ox: a hosted plugin's parameter (VST3 / AU / LV2 / VST2 / CLAP, a Patcher's published one): its value lives
+    // in the plugin, so the host keeps the user's own value here (0..1) and sends clamp (base + depth × mod). −1 = none
+    // (LYNX's own controls: their value is in the song). An automation of the target still sets the base.
+    float base = -1.0f;
     bool operator== (const ModRoute&) const = default;
 };
+
+// Round 190ox, modulators stage 2 (research 190oe P9): the kind of source. An LFO is stage 1's (every modulator saved
+// before this round); the others are LYNX's own, saved where older releases do not read them (ProjectFile).
+enum class ModKind : std::uint8_t
+{
+    lfo,      // shape × rate (stage 1)
+    follower, // envelope follower: an insert's level (attack, release, gain)
+    envelope, // ADSR envelope retriggered by a channel's notes
+    steps,    // step sequencer: 1-32 values, a step length, glide
+    random,   // sample and hold: a new value per step, smoothed
+    macro,    // a plain knob (automatable: AutomationTargetKind::modulatorMacro)
+    keytrack, // the last note's key on a channel (C5 = 0, ±5 octaves = ±1)
+    velocity  // the last note's velocity on a channel
+};
+constexpr int modKindCount = 8;
 
 struct Modulator
 {
@@ -1956,12 +2217,55 @@ struct Modulator
     bool unipolar = false;       // 0..1 instead of -1..1
     std::uint32_t seed = 1;      // the random shapes' sequence
     std::vector<ModRoute> routes;
+
+    // --- round 190ox: stage 2 (every field below keeps its default on an LFO, so stage 1's modulators stay as they were)
+    ModKind kind = ModKind::lfo;
+    // Where the modulator sits (LYNX's Modulators panel groups by it): a channel (channelVolume, index = channel), a
+    // mixer insert (mixerVolume, index = insert) or nowhere (none). Kept as targets so moving / deleting channels and
+    // inserts carries them along (Song::forEachTarget).
+    AutomationTarget host;
+    // The follower's insert (mixerVolume) or the note source of an envelope / keytrack / velocity (channelVolume);
+    // none = the host's own (a channel host's insert for a follower).
+    AutomationTarget input;
+    float attack = 10.0f, decay = 300.0f, sustain = 0.6f, release = 250.0f; // ms (follower: attack and release)
+    float gain = 0.0f;           // follower: input gain, dB
+    std::vector<float> steps;    // step sequencer: −1..1 each (1-32 of them); `beats` is one step's length
+    float glide = 0.0f;          // steps: 0..1 of a step spent sliding to the next value
+    float smooth = 0.0f;         // random: 0 = stepped (sample and hold) … 1 = smooth curve
+    float macro = 0.0f;          // macro: the knob's value, 0..1
     bool operator== (const Modulator&) const = default;
 
     // The output at `cycles` (cycles since the song start, or since the modulator started when free).
     float output (double cycles) const noexcept;
-    static bool canModulate (const Song& song, const AutomationTarget& target) noexcept; // LYNX's own controls
+    // Round 190ox: the step sequencer's and the random source's output at `stepsIn` steps (a step = `beats` / 1 / hz).
+    float stepOutput (double stepsIn) const noexcept;
+    // Whether its output follows the song position alone (LFO, steps, random synced; macro): an export can bake it.
+    bool deterministic() const noexcept;
+    // A new modulator of `kind` with that kind's defaults ("Steps 1": 8 steps of 1/16…).
+    static Modulator make (ModKind kind);
+    static const char* kindName (ModKind kind) noexcept; // English (TR_NOOP'd at the UI): "LFO", "Envelope follower"…
+    static bool canModulate (const Song& song, const AutomationTarget& target) noexcept; // LYNX's own controls, hosted plugins
+    // A hosted plugin's (or a Patcher's published) parameter: its base lives in ModRoute::base.
+    static bool isHostedTarget (const Song& song, const AutomationTarget& target) noexcept;
 };
+
+namespace modenv
+{
+// The ADSR / follower state the renderer keeps per modulator (audio thread). `advance` moves it by `seconds`.
+struct State
+{
+    float level = 0.0f;
+    std::uint8_t stage = 0; // envelope: 0 idle, 1 attack, 2 decay, 3 sustain, 4 release
+    std::uint32_t notesSeen = 0;
+    float lastKey = 60.0f, lastVelocity = 0.0f;
+    float smoothed = 0.0f;
+    bool primed = false, primedSmooth = false;
+};
+// The envelope over `seconds` with the notes held or not (`gate`), retriggered when `trigger`.
+void envelope (const Modulator& m, State& s, bool gate, bool trigger, double seconds) noexcept;
+// The follower towards `peak` (linear, after the gain) over `seconds`.
+void follow (const Modulator& m, State& s, float peak, double seconds) noexcept;
+} // namespace modenv
 
 // One chord of a keyboard chord set (round 190ds; FL Studio Mobile's KEYB entries {baseNote, extensions, octave,
 // quality}, docs/analise/FLM_FORMAT.md §2): root pitch class, quality (0 major, 1 minor, 2 augmented, 3 diminished,
@@ -2158,7 +2462,16 @@ std::vector<MidiLink> linksWithGlobal (const std::vector<MidiLink>& project, con
 // track's clip stop button, Stop all clips, or a transport switch.
 enum class RemoteAction : std::uint8_t
 {
-    parameter, clipSlot, sceneLaunch, trackStop, stopAllClips, play, stop, record, sessionRecord, metronome
+    parameter, clipSlot, sceneLaunch, trackStop, stopAllClips, play, stop, record, sessionRecord, metronome,
+    // round 190kc: Live's crossfader positions (Crossfader Left / Center / Right) and its Relative Session Mapping Strip
+    // (Scene Up / Down, Launch the highlighted scene, Cancel Launch, a track's clip at the highlighted scene: track)
+    crossfaderLeft, crossfaderCentre, crossfaderRight, sceneUp, sceneDown, launchSelectedScene, cancelLaunch, launchSelectedClip,
+    // round gap190og (coverage live4:mapping-0028): the rest of Live's mappable transport switches — Arrangement Overdub,
+    // the Arrangement Loop switch, Punch-In and Punch-Out [SHOT live190ei/shots/live-key-map-mode-full.png: Key Map Mode
+    // marks them in the Control Bar; DOC Live 12 manual 30.2 "Switches and buttons — Among them [...] the Control Bar's
+    // tap tempo, metronome and transport controls"; STR live-exe-strings-u16.txt 2180-2186, 5273: "Arrangement Overdub",
+    // "Arrangement Loop switch", "Punch-in switch", "Punch-out switch"]. Appended: saved projects keep their numbers.
+    overdub, loopSwitch, punchIn, punchOut
 };
 // A mapping of a computer key (Key Map Mode), or of a MIDI controller / key to something other than a parameter (MIDI
 // Map Mode; a parameter's MIDI mapping is a MidiLink, FL's storage). Saved with the project (the reference saves key
@@ -2211,6 +2524,21 @@ struct AutomationLane
     bool operator== (const AutomationLane&) const = default;
 };
 
+// LYNX extra, round 190pe (P20 of research190oe; core/TrackVersions.h): a named alternate version of a whole Playlist
+// track, as Cubase's Track Versions and Pro Tools' playlists. The active version's content is the track itself (its
+// clips in the arrangement it was made in, its automation lanes, its own insert's effects); every other version keeps
+// its own content here and plays nothing. Song::forEachClipList visits the stored clips, so a pattern, channel,
+// automation or track that is renumbered is renumbered here too.
+struct TrackVersion
+{
+    std::string name;
+    std::vector<Clip> clips {};           // not active: the track's clips (Clip::track = the track)
+    std::vector<AutomationLane> lanes {}; // not active: its automation lanes (their automations stay in Song::automations)
+    bool hasChain = false;                // not active: `chain` is the effects of the track's own insert in this version
+    std::vector<EffectSlot> chain {};
+    bool operator== (const TrackVersion&) const = default;
+};
+
 // Header of a Playlist track.
 struct PlaylistTrack
 {
@@ -2222,9 +2550,18 @@ struct PlaylistTrack
     // ungrouped track above it (the group's header). `collapsed` on a header folds its members into thin rows.
     bool grouped = false;
     bool collapsed = false;
+    // Round 190jf (slice B17, LYNX's nested folders; FL's groups have one level): the extra nesting levels of a grouped
+    // track. Its folder depth is `grouped ? 1 + nest : 0` and it belongs to the nearest track above it with a smaller
+    // depth (core/NoteEdit.h › folders). 0 everywhere = FL's groups; a .flp gets them flattened. Saved apart
+    // ("playlistTrackNest") so an older LYNX opens the groups one level deep.
+    int nest = 0;
     // A comp track (round 177c, core/Comping.h): this group header is what plays, its grouped tracks are take lanes. Set
     // only by "Comp these takes"; a group of takes is an ordinary track group until then.
     bool compTrack = false;
+    // Round qafix190kq (QA-2): an imported take lane (Live's TakeLanes, core/AlsImport.cpp) — also one nested under a track
+    // inside a group, whose header is a plain folder (a comp needs a top-level header). Lanes belong to their track: the
+    // clip grid and the Session mixer show no column for them (comp::isTakeLane). Saved ("playlistTakeLanes").
+    bool takeLane = false;
     // FL's "Track mode" (REA round 146a; .flp record 0xEE: u32 mode at byte 49 = 0 / 1 audio / 3 instrument, i32 mixer
     // track at 53, i32 channel at 57). An audio track is linked to a mixer track: audio clips placed on it play through
     // that track (their channel is routed there). An instrument track belongs to a channel (and its mixer track).
@@ -2244,6 +2581,24 @@ struct PlaylistTrack
     // round 190cg (Live's track fold switch): the row is folded to a thin strip that still shows its clips as bars; its
     // lanes hide with it. View only; saved with the project.
     bool folded = false;
+    // FL's Shift+click on a Playlist track's mute switch = lock its state (manual Playlist › Mute / Solo, round 190ld): a
+    // solo of another track leaves it as it is. Saved ("playlistTrackSoloLocks").
+    bool soloLock = false;
+    // LYNX extra, round 190ne (0.1.31, core/TrackClips.h): "Clips own their notes" on an FL instrument track. The pencil
+    // draws a new empty clip of its own on empty space, and copies are unique (a linked copy by choice); its clips'
+    // patterns are track clips (Pattern::trackClip). Meaningful only while `mode` is instrument. Off by default in the
+    // Pattern layout (FL's own instrument track), on for new instrument tracks in the Clip-launch and Simple layouts.
+    // Saved ("playlistOwnClips"); an .flp keeps FL's instrument track.
+    bool ownClips = false;
+    // LYNX extra, round 190op (P4): "Hide track". The row (and in the Clip-launch layout its column) is left out of view
+    // until "Show hidden tracks" is on; the track still plays. View only; saved ("playlistTracksHidden").
+    bool hidden = false;
+    // LYNX extra, round 190pe (P20): the track's versions (TrackVersion); empty = none, the track as always. With some,
+    // there are at least two and versions[activeVersion] holds only its name. They belong to the arrangement with index
+    // `versionArrangement` (clips are per arrangement; the lanes and the mixer are shared). Saved ("playlistTrackVersions").
+    std::vector<TrackVersion> versions {};
+    int activeVersion = 0;
+    int versionArrangement = 0;
     bool operator== (const PlaylistTrack&) const = default;
 };
 
@@ -2266,7 +2621,53 @@ struct PatternBlock
 {
     int pattern = 0;
     std::int64_t start = 0; // ticks: the start of a bar
+    bool muted = false;     // the Mute tool (issue #127): a muted block stays in place and plays nothing
     bool operator== (const PatternBlock&) const = default;
+};
+
+// A song section of the Sections lane (round 190ol, P1 of research190oe; the arranger track of GarageBand / Studio Pro,
+// core/Sections.h): a named stretch of the arrangement, [start, start + length) in ticks, on whole bars. The sections of
+// an arrangement are sorted by start and never overlap; a gap between two is allowed. LYNX extra: FL and Live have none
+// (an .flp / .als / DAWproject export writes plain time markers / locators / markers at their starts).
+struct SongSection
+{
+    std::int64_t start = 0, length = 0;
+    std::string name;
+    std::uint32_t colour = 0; // 0xFFRRGGBB; 0 = automatic (by its place, sections::colourOf)
+    std::uint64_t uid = 0;    // stable within the arrangement (a drag keeps hold of its section by it)
+    std::int64_t end() const noexcept { return start + length; }
+    bool operator== (const SongSection&) const = default;
+};
+
+// Round 190pa (research190oe P14, core/RangeEdit.h): a time range on chosen Playlist tracks only (REAPER's razor edit),
+// or on one automation lane of a track. The current arrangement's; saved with the project ("trackRange").
+struct TrackRange
+{
+    std::int64_t from = 0, to = 0; // [from, to) in ticks
+    std::vector<int> tracks;       // Playlist tracks, sorted, each once
+    int laneAutomation = -1;       // >= 0: only that automation lane (of tracks.front()), no clips
+    bool empty() const noexcept { return to <= from || tracks.empty(); }
+    bool covers (int track) const noexcept { return std::binary_search (tracks.begin(), tracks.end(), track); }
+    int top() const noexcept { return tracks.empty() ? 0 : tracks.front(); }
+    bool operator== (const TrackRange&) const = default;
+};
+
+// A chord of the Chord lane (round 190pf, research190oe P13; Cubase / Logic / Studio Pro's chord track, core/ChordLane.h):
+// [start, start + length) in ticks; the chord as the Chord pad's sets store theirs (Song::keyboardChords, FL Studio
+// Mobile's numbering): `quality` 0 major, 1 minor, 2 augmented, 3 diminished, 4 sus2, 5 sus4, 6 power chord, then
+// `extensions` in semitones above the root (10 = 7, 11 = maj7, 9 = 6, 14 = 9...), `bass` a pitch class played under it
+// (a slash chord) or -1. Sorted by start, no overlaps, gaps allowed. LYNX extra: FL and Live have none (an .flp export
+// writes a time marker per chord, named after it).
+struct SongChord
+{
+    std::int64_t start = 0, length = 0;
+    int root = 0;    // pitch class 0..11
+    int quality = 0;
+    std::vector<int> extensions {};
+    int bass = -1;   // pitch class, -1 = the root
+    std::uint64_t uid = 0;
+    std::int64_t end() const noexcept { return start + length; }
+    bool operator== (const SongChord&) const = default;
 };
 
 struct Arrangement
@@ -2277,6 +2678,12 @@ struct Arrangement
     std::vector<Marker> markers;           // sorted by tick (stay here even for the current arrangement)
     std::uint64_t uid = 0;                 // stable id (Online Sessions, round 168a)
     std::vector<PatternBlock> blocks {};   // Pattern Blocks (round 170f); empty for the current one: Song::blocks
+    // round 190ol: the Sections lane (SongSection), sorted; like the markers, kept here for the current arrangement too.
+    // Saved in .lynx as the arrangement's "sections" only when there are some (older LYNX ignores the key)
+    std::vector<SongSection> sections {};
+    // round 190pf: the Chord lane (SongChord), sorted; kept here for the current arrangement too. Saved in .lynx as the
+    // arrangement's "chords" only when there are some (older LYNX ignores the key)
+    std::vector<SongChord> chords {};
     bool operator== (const Arrangement&) const = default;
 };
 
@@ -2354,6 +2761,20 @@ struct ClipGridSlot
     bool blankName = false;
     ClipFollow follow;
     std::uint32_t groove = 0;       // the groove of the project's pool this clip plays through (Groove::id; 0 = none; core/Groove.h)
+    // round 190hr (Live's Clip panel, detail-016): with Loop on, the clip's Clip::offset / length are the loop (Live's
+    // Loop Position / Length) and the Start marker sits `startMarker` ticks into it (Live's StartRelative): a launch plays
+    // from the Start marker to the loop's end, then the loop. 0 = the Start marker on the loop start, as every clip saved
+    // before; kept in [0, length). Saved in .lynx ("startMarker") only when not 0.
+    std::int64_t startMarker = 0;
+    // round 190hr (Live's Clip Scale, detail-022): the clip's own scale. `ownScale` off = the clip follows the project key
+    // (every clip saved before; Live's new clips take the current scale). On: `scaleRoot` (0…11) and `scaleIndex` (FL's
+    // reference-scale index, as projectkey::Key::flScale). `scaleOn`: Live's Scale Mode switch of the clip (IsInKey).
+    bool ownScale = false, scaleOn = true;
+    std::int8_t scaleRoot = 0;
+    std::int16_t scaleIndex = 0;
+    // round 190im (R12, DL-15): Live's deactivated clip (the 0 key, "Deactivate Selected Clip"): drawn greyed, a launch
+    // (its own, a scene's, a follow action's) leaves it silent. Saved in .lynx only when off ("inactive")
+    bool active = true;
     bool operator== (const ClipGridSlot&) const = default;
 };
 
@@ -2366,6 +2787,11 @@ struct ClipGridScene
     // round 190em: the scene time signature's denominator (Live's field is "n / d"; 1, 2, 4, 8 or 16). A launch gives
     // the song this meter (round 190fg: Song::beatUnit; before, the same bar length in quarter notes)
     int beatUnit = 4;
+    // round 190lr (DL-14): Live's scene Follow Action (the Scene View's lower section, .als Scene/FollowAction). A scene
+    // has no Linked mode ("The Linked/Unlinked switch is only available for clips", Live 12 manual 16.7): the action
+    // comes `follow.ticks` after the scene starts (Follow Action Time); `linked` / `iterations` are only kept for the set.
+    // Saved in .lynx only when it is not the default.
+    ClipFollow follow {};
     bool operator== (const ClipGridScene&) const = default;
 };
 
@@ -2376,7 +2802,22 @@ struct ClipGridScene
 struct SessionMixerView
 {
     bool shown = true, io = true, sends = true, volume = true, trackOptions = false;
+    // round 190kc: Live's Mixer Controls › Return Tracks and Crossfader (SessionReturns, SessionCrossFade)
+    bool returns = true, crossfader = false;
     bool operator== (const SessionMixerView&) const = default;
+};
+
+// Round 190nc (DL-110, Live 12 manual 18.6 "Soloing and Cueing"; the Main strip's controls captured in 190mv B1
+// live-solo-cue.png): the Main track's Solo/Cue Mode switch, its Cue Out (device outputs: a stereo pair or one channel;
+// outputDefault = the same as Main Out, Live's default) and its Cue Volume (0..1 on Live's volume taper, 0.85 = 0 dB).
+// Cue mode works only while the Cue Out is an output other than the Main Out's (sessionmixer::cueOutputSeparate).
+struct SessionCue
+{
+    bool cueMode = false;
+    int out = outputDefault;
+    OutputMode outMode = OutputMode::stereo;
+    float volume = 0.85f;
+    bool operator== (const SessionCue&) const = default;
 };
 
 struct ClipGrid
@@ -2391,6 +2832,7 @@ struct ClipGrid
     bool followActions = true; // follow actions on the whole grid (off: edit playing clips with no jumps)
     bool backOnStop = false; // "Give tracks back to the Playlist when the transport stops" (off: they stay taken until asked)
     SessionMixerView mixerView; // round 190dr: the Session mixer's sections
+    SessionCue cue;             // round 190nc (DL-110): the Main strip's Solo/Cue switch, Cue Out and Cue Volume
     bool operator== (const ClipGrid&) const = default;
 };
 
@@ -2417,6 +2859,16 @@ struct ProjectInfo
 inline void resetWorkTime (ProjectInfo& info, double nowSeconds) noexcept
 {
     info.created = nowSeconds;
+    info.workSeconds = 0.0;
+}
+
+// Issue #240 (round 190od): a template is where a project starts, not part of its history. A user's template keeps the
+// date and the working time it was saved with, so a project made from it showed the template's "Created" and counted on
+// from the time spent building the template. A new project from a template (and a template being saved) drops both:
+// the new project is dated when it starts (AudioEngine::markCreatedNow) and its clock starts at 0:00:00.
+inline void clearProjectClock (ProjectInfo& info) noexcept
+{
+    info.created = 0.0;
     info.workSeconds = 0.0;
 }
 
@@ -2487,6 +2939,28 @@ struct MasterLookSettings
     bool operator== (const MasterLookSettings&) const = default;
 };
 
+// LYNX extra, round 190nw (0.1.31; core/TrackerGrid.h, ui/TrackerComponent.h): the tracker editor's settings for this
+// project. The tracker is a VIEW of the patterns' own notes (no other data): these only say how it shows them — rows per
+// beat, the shown columns, and track groups (several rack channels in one tracker track, told apart by its Ins column;
+// channels by their uid, so moving channels keeps the groups). Saved in .lynx only when not the default; the .flp / .als
+// exports and older LYNX releases ignore it.
+struct TrackerGroup
+{
+    std::string name;
+    std::vector<std::uint64_t> channels; // ChannelDef::uid, in the group's order
+    bool operator== (const TrackerGroup&) const = default;
+};
+
+struct TrackerSettings
+{
+    static constexpr int minRowsPerBeat = 1, maxRowsPerBeat = 16;
+    int rowsPerBeat = 4;
+    bool showPan = false, showDelay = true, showFx = true;
+    std::vector<TrackerGroup> groups;
+    bool isDefault() const noexcept { return *this == TrackerSettings {}; }
+    bool operator== (const TrackerSettings&) const = default;
+};
+
 struct Song
 {
     double bpm = 130.0;
@@ -2502,8 +2976,14 @@ struct Song
     std::uint32_t chanceSeed = 0;
     std::vector<std::string> channelGroups; // the Channel Rack's filter groups (FL's "All" dropdown), by name
     float masterPitch = 0.0f; // cents, -1200..1200: shifts every note of the built-in instruments (the toolbar's master pitch)
+    // round 190oa (DF-21, owner decision F1; FL manual "Monitor Volume changes are not reflected in renders and it can't
+    // be automated", REA 190oa R2: FL's gain (11^v − 1) / 10 on the output, skipped while rendering, saved in the project
+    // as control 0x40000000, 0…16000 with 12800 = 0 dB): the toolbar's main volume, a fader position (unityFader = 0 dB)
+    // applied to what the audio device plays only — never in an export, never automated
+    float mainVolume = unityFader;
     ProjectInfo info;
     MasterLookSettings masterLook;
+    TrackerSettings tracker; // round 190nw: the tracker editor's view settings (TrackerSettings)
     // Online Sessions (round 168a): the project's lineage (random 128-bit hex, kept by copies and packages), the last
     // uid counter used and who works on it (uids::normalize fills the first two)
     std::string projectId;
@@ -2523,6 +3003,11 @@ struct Song
     // round 190cg (Live's Arrangement Loop switch; FL has none): the range above stays (the time selection, the export
     // range, the punch region) but playback does not loop it. False = FL's behaviour: a range loops. Saved with the project.
     bool loopOff = false;
+    // round 190pa (P14, LYNX extra): the range on chosen tracks (empty: none); FL's time selection above is apart
+    TrackRange trackRange;
+    // round 190pa (P21, core/AutomationModes.h): the automation write mode, 0 = Read (FL's Record automation, the
+    // default), 1 Touch, 2 Latch, 3 Write. Saved with the project ("automationWriteMode", only when not Read).
+    int automationWriteMode = 0;
     // The tempo lane's shown range in BPM (round 190cg; Live's range fields beside the tempo envelope): an automation
     // lane of the tempo spans tempoViewLow…tempoViewHigh instead of the whole 10…522. View only: the values stay.
     // 0 / 0 = the whole range (every project before this round). Saved with the project.
@@ -2556,8 +3041,12 @@ struct Song
             for (auto& lane : p.events)
                 fn (lane.target);
         for (auto& m : modulators)
+        {
             for (auto& r : m.routes)
                 fn (r.target);
+            fn (m.host); // (round 190ox: where it sits and what it follows)
+            fn (m.input);
+        }
     }
     void removeDeadMidiLinks();
 
@@ -2571,6 +3060,10 @@ struct Song
                 fn (arrangements[i].clips);
         if (clipGrid)
             fn (clipGrid->clips);
+        for (auto& t : playlistTracks) // (round 190pe: the stored clips of the versions that are not active)
+            for (std::size_t v = 0; v < t.versions.size(); ++v)
+                if ((int) v != t.activeVersion)
+                    fn (t.versions[v].clips);
     }
     template <typename Fn>
     void forEachClipList (Fn&& fn) const
@@ -2581,6 +3074,10 @@ struct Song
                 fn (arrangements[i].clips);
         if (clipGrid)
             fn (clipGrid->clips);
+        for (const auto& t : playlistTracks)
+            for (std::size_t v = 0; v < t.versions.size(); ++v)
+                if ((int) v != t.activeVersion)
+                    fn (t.versions[v].clips);
     }
 
     // Applies `fn` to all Pattern Block lists (the current arrangement's and the stored ones).
@@ -2615,6 +3112,11 @@ struct Song
     bool automationChunks = false;
     std::optional<ClipGrid> clipGrid; // the Clip-launch workflow's grid (round 181a); empty until it is first used
     GroovePool grooves; // the groove pool (round 190bv); empty in every project that never used one
+    // Live's crossfader (round 190kc, the Clip-launch layout; core/Crossfader.h): its position -1 (A) .. 1 (B) and its
+    // curve (Live's CrossfadeCurve: 0 Dipped, 1 Intermediate, 2 Constant Power, 3 Slow Fade, 4 Slow Cut, 5 Fast Cut,
+    // 6 Transition; Live's default set: 2). Only inserts with a Crossfade Assign hear it. Saved when not the default.
+    float crossfader = 0.0f;
+    int crossfadeCurve = 2;
     // The end of the performance zone: the first Start marker's tick, or 0 (no zone) without one / when off.
     std::int64_t performanceZoneEnd() const noexcept;
     bool inPerformanceZone (const Clip& clip) const noexcept { return performanceMode && clip.start < performanceZoneEnd(); }
@@ -2623,6 +3125,12 @@ struct Song
     std::vector<Marker>& markers();
     const std::vector<Marker>& markers() const;
     void addMarker (Marker marker); // keeps the order
+    // Sections of the current arrangement (round 190ol, core/Sections.h)
+    std::vector<SongSection>& sections();
+    const std::vector<SongSection>& sections() const;
+    // round 190pf: the current arrangement's Chord lane (core/ChordLane.h)
+    std::vector<SongChord>& chords();
+    const std::vector<SongChord>& chords() const;
 
     // Bars that play in [from, to), taking the markers' time signature changes into account
     // (before the first one, the song's meter applies: beatsPerBar / beatUnit).
@@ -2631,6 +3139,10 @@ struct Song
 
     std::vector<MixerTrack> mixer; // [0] = Master; empty = everything straight to the output
     std::vector<Vca> vcas;         // VCA faders (round 177a); empty = none (no cost anywhere)
+    // Mix snapshots (round 190hp; core/MixSnapshots.h): the list, and the snapshots recalled last and the one before
+    // it (indices, -1 = none; "Compare A/B" swaps them). Saved with the project.
+    std::vector<MixSnapshot> mixSnapshots;
+    int mixSnapshotCurrent = -1, mixSnapshotPrevious = -1;
     // A/B of the LYNX substitutes (round 113): when set, every substitute slot plays as bypassed (the project's own
     // effects and the hosted plugins still play). Saved with the project.
     bool substitutesBypassed = false;
@@ -2669,6 +3181,19 @@ struct Song
     // behaviour before (the insert skipped its effects); projects saved before keep it off, .flp imports and new
     // projects turn it on. Saved with the project.
     bool muteRunsEffects = false;
+    // FL's slide notes and the note properties (issue #236, round 190od; FL manual, Piano roll › Slide notes: "During
+    // slides all note properties move toward those set in the slide note"; FL 2026's renders, REA_rodada190od): a slide
+    // note moves the sounding notes' velocity (their volume), pan and Mod X / Y to its own, in FL's per-tick steps, as
+    // it moves their pitch. Off = LYNX's behaviour before (a slide moved the pitch only); projects saved before keep it
+    // off, .flp imports and new projects turn it on. Saved with the project.
+    bool slideNoteProps = false;
+    // FL 2026's export follows two of the arrangement's marker actions (round 190pr, FL64 /R renders, REA_rodada190pr): it
+    // starts at the Start marker (Umziky with the marker at 1536, 2976 and 3456 ticks starts there; made a plain marker: bar
+    // 1) and jumps over each Marker skip's section (Raubana – LIFE: 89 s of music instead of 212 s; its skips made plain
+    // markers: 212 s). A Marker pause does not stop it and marker loops are not followed (as REA_rodada165f found). Off =
+    // LYNX before 0.1.32 (the song straight through); projects saved before keep it off, .flp imports and new projects turn
+    // it on. Saved with the project.
+    bool exportMarkers = false;
     // FL 2026 (round 190eh renders, issue #158): a pattern plays from one Playlist clip at a time. A clip of the same
     // pattern that starts later (on any track) takes over at its start: the earlier clip starts no more notes from there
     // (also after the later clip has ended), the notes it already started play to their ends (scheduleSong). Clips of
@@ -2698,6 +3223,16 @@ struct Song
     // whose input the compensation delays is delayed with it (the value it gets is the one at its delayed position).
     bool autoPdc = true;
     bool compensateAutomations = true;
+    // LYNX extra (round 190hq, B13; complaint "automation early with latent plugins"): with "Compensate automations" on,
+    // the automation of an insert's fader and pan, of a route's level and of a VCA fader is taken as late as the audio
+    // it acts on (the insert's input alignment plus its effects' latencies). FL's "Compensate automations" is proven for
+    // mixer effect parameters only (REA round 168j), so a project from before (and an .flp import) keeps this off; a new
+    // project starts with it on. Saved as "mixerLevelPdc190hq" when on.
+    bool compensateMixerLevels = true;
+    // Round 190hq (Live 12.4: a launched scene's tempo overrides the Arrangement's tempo automation until "Back to
+    // Arrangement"): while set, the song plays at `bpm` and its tempo automation / tempo markers are held. Set by a scene
+    // launch with its own tempo (AudioEngine::launcherCommand), cleared by Back to Playlist. Not saved.
+    bool sceneTempoHold = false;
     // FL's Options › Project › Time settings (REA round 168j, .flp 0x23, TimeSettingComboChange): show the project's time
     // settings as a time signature (beats per bar / beat unit) instead of FL's time division (beats per bar, steps per beat)
     bool timeSignatureMode = false;
@@ -2727,6 +3262,9 @@ struct Song
     // writes the used ones only. Empty: no cost.
     std::vector<ClipEnvelope> clipEnvelopes;
     std::vector<Modulator> modulators; // round 177b: LYNX's modulators (empty: no cost)
+    // round 190kx (core/AraLink.h): the ARA documents of the plugins the song's audio clip channels are edited in (their
+    // edits: Melodyne's notes...), as each plugin archived them at the last save; empty: none (no cost)
+    std::vector<AraDocumentArchive> araDocuments;
     std::vector<PlaylistTrack> playlistTracks; // index = track; tracks past the end use the default
     // The Playlist's default row in px at 100 % (FL's base row): FL 2026's 48 (live check 190gu B1, the Default template
     // at FL's default zoom); a .lynx saved before round 190gw has no such key and keeps LYNX's old 38. A row's FL size
@@ -2823,6 +3361,8 @@ struct Song
 
     // Removes an automation and its clips.
     void removeAutomation (int index);
+    // Round 190ox: deletes modulator `index`; what pointed at a later Macro's knob moves down, at this one's goes.
+    void removeModulator (int index);
 
     // Current value (from the model, without automation) of the target, 0..1; -1 if the target doesn't exist.
     float targetValue (const AutomationTarget& target) const noexcept;

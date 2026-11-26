@@ -27,6 +27,10 @@ struct Song;
 namespace videotracks
 {
 bool isVideoFile (const juce::File& file);
+// A video file's sound track as a WAV in the cache (decoded by the system / ffmpeg the first time; blocking, any thread);
+// a file that does not exist when the video has no sound that can be read. Handed to the sample library at start-up
+// (round als190ka, issue #193: the sound of a Live set's video clips).
+juce::File soundTrackWav (const juce::File& video);
 // Adds `file` as a clip at song time `songSeconds` on video track `track` (−1: the first track with room, a new
 // track when none has); one undo step. False when no decoder can read it (the user is told why).
 bool importVideo (AudioEngine& engine, const juce::File& file, double songSeconds, int track = -1);
@@ -80,6 +84,10 @@ public:
     ui::Hint hintAt (juce::Point<int> position) override;
 
     void refresh(); // the song changed
+
+    // Shot routes / tests (rollup 0.1.31 step 3, #193 flake): waits until every thumbnail strip asked for so far is made
+    // (they come from a background thread). False when one is still being made after `timeoutMs`.
+    static bool waitForThumbnails (int timeoutMs);
 
 private:
     void timerCallback() override;

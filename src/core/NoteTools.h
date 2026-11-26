@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <array>
+#include <string>
 #include <vector>
 
 #include "core/Song.h"
@@ -24,11 +25,36 @@ enum class Level
     release,   // 0..1
     finePitch, // -120..120 cents -> 0..1
     modX,      // 0..1
-    modY       // 0..1
+    modY,      // 0..1
+    // the Channel Rack graph editor's own lanes (issue #208; FL 2026's Note pitch, Shift and Repeat)
+    notePitch, // key 0..127 -> 0..1
+    shift,     // the start's offset in its step, FL's "100 % = 99 % of a step" -> 0..1 (setting it moves the note in its step)
+    repeat     // FL's repeat rate index 0..noterepeat::rateCount -> 0..1
 };
 
-constexpr int levelCount = 6;
+constexpr int levelCount = 6; // the Piano roll's lanes (velocity .. Mod Y)
 const char* levelName (Level level); // English, for tr()
+
+// The Channel Rack graph editor's lanes in FL's order and with FL's names (FL Studio 2026, FLEngine 0x15d81e8):
+// Note pitch, Velocity, Release velocity, Fine pitch, Panning, Mod X, Mod Y, Shift, Repeat
+constexpr int stepLevelCount = 9;
+Level stepLevel (int tab) noexcept;
+// FL's tab names: `size` 2 = full ("Release velocity"), 1 = medium ("Release", "Repeats"), 0 = short ("Rel", "Rep")
+const char* stepLevelName (int tab, int size = 2);
+// Round 190lx's names for the same lanes (DE-30; kept so its Channel Rack code and this round's merge cleanly): lane ids
+// are Level values, 6 = Note (pitch), 7 = Shift, 8 = Repeat, in FL's tab order
+constexpr int graphLaneCount = stepLevelCount, graphNote = (int) Level::notePitch, graphShift = (int) Level::shift, graphRepeat = (int) Level::repeat;
+inline constexpr int graphTabOrder[graphLaneCount] { graphNote, (int) Level::velocity, (int) Level::release, (int) Level::finePitch,
+                                                     (int) Level::pan, (int) Level::modX, (int) Level::modY, graphShift, graphRepeat };
+const char* graphLaneName (int lane);                                                        // FL's full tab name, for tr()
+float graphValue (const Note& note, int lane, std::int64_t stepTicks = ticksPerStep) noexcept; // = levelValue
+void setGraphValue (Note& note, int lane, float normalised, std::int64_t stepTicks = ticksPerStep) noexcept;
+float graphDefault (int lane) noexcept;
+bool graphIsBipolar (int lane) noexcept;
+
+// FL's hint-bar value of the graph editor's own lanes: Note pitch "C5", Shift "0.25" (of a step), Repeat "1/32 triplet"
+// (English; "No repeat" goes through tr()); "" for the other lanes
+std::string levelText (Level level, float normalised);
 float levelValue (const Note& note, Level level) noexcept;
 void setLevelValue (Note& note, Level level, float normalised) noexcept;
 float levelDefault (Level level) noexcept; // normalised value of a fresh note
@@ -53,6 +79,21 @@ const std::vector<FlReferenceScale>& flReferenceScales();
 // The scales() index with the same degrees as FL's reference scale `flIndex`; 0 = none (also FL's −1 Default,
 // −2 Black notes, −3 Automatic and the scales LYNX does not list)
 int scaleForFlReference (int flIndex) noexcept;
+// FL's own index of a reference scale (its menus' order: what .flp 0xF3 and a key marker's 0xA8 hold) for an index of
+// flReferenceScales(), and back (the same swap both ways; anything else unchanged). Rollup 0.1.31 step 3 (round 190ny),
+// measured with FL 2026 saves: FL lists "Other Blues" before "Other Blues Nonatonic" (17, 18), "Other Locrian" before
+// "Other Locrian Super" (27, 28) and "Other Phrygian" before "Other Phrygian Dominant" (32, 33); LYNX's list (and every
+// .lynx, which stores its index) has each pair the other way, so the .flp import / export convert at the file.
+constexpr int flMenuScaleIndex (int index) noexcept
+{
+    switch (index)
+    {
+        case 17: return 18; case 18: return 17;
+        case 27: return 28; case 28: return 27;
+        case 32: return 33; case 33: return 32;
+        default: return index;
+    }
+}
 bool inScale (int key, int root, int scale) noexcept;
 // The in-scale key nearest to `key` (a tie goes down); `key` itself without a scale. Stays in 0..127.
 int snapToScale (int key, int root, int scale) noexcept;

@@ -12,8 +12,11 @@
 #                       docs/STORE.md), which it installs and self-tests with a test identity
 #   linux    (ubuntu)   CMake + GCC 13 build in an Ubuntu 22.04 container (glibc 2.35), glibc check, self-test,
 #                       AppImage and .tar.gz (scripts/package-linux.sh), offline start check of the AppImage
-#   macos    (macos)    CMake universal (arm64 + x86_64) build, self-test, ad-hoc signature (no Apple Developer ID,
-#                       not notarized), .dmg (scripts/package-macos.sh)
+#   macos    (macos)    macos-app.yml: arm64 and x86_64 built on two runners in parallel, merged with lipo (round 190qd),
+#                       self-test, ad-hoc signature (no Apple Developer ID, not notarized), .dmg (scripts/package-macos.sh)
+#   linux-arm64         linux-arm64.yml on GitHub's arm64 runner: the Linux job's steps for aarch64 (round 190oy),
+#                       LYNX-<label>-aarch64.AppImage and LYNX-<label>-linux-aarch64.tar.gz. publish waits for it and
+#                       takes its files when it passed; a failure there does not hold back the other platforms
 #   publish  (ubuntu)   SHA256SUMS.txt over every file; on a tag push attaches everything to the (draft) GitHub release
 #   plugins             the optional plugin download (plugins.yml: LYNX's effects as CLAP + a short VST3 list for Windows,
 #                       Linux and macOS, each checked with plugexporttest, pluginval and clap-validator); never in the
@@ -59,7 +62,7 @@ jobs:
         id: version
         shell: bash
         run: |
-          version="$(sed -n 's/^project(LYNX VERSION \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' CMakeLists.txt)"
+          version="$(sed -n 's/^project(LYNX VERSION \([0-9]*\.[0-9]*\.[0-9]*\(\.[0-9]*\)\{0,1\}\).*/\1/p' CMakeLists.txt)"
           [[ -n "$version" ]] || { echo "::error::no version in CMakeLists.txt"; exit 1; }
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             tag="${GITHUB_REF_NAME#v}"
@@ -102,10 +105,19 @@ jobs:
           echo "$JUCE_SHA256  juce.tar.gz" | sha256sum -c -
           tar xzf juce.tar.gz && mv "JUCE-$JUCE_VERSION" "juce-$JUCE_VERSION" && rm juce.tar.gz
 
+      # Release code generation (round 190kz, owner decision; docs/PLATFORMS.md "Release optimisation"): a real -O3
+      # (zig maps -O3 to -O2, so the -O3 goes to clang itself) and ThinLTO of LYNX's own objects; the instruction set
+      # stays the x86-64 baseline (SSE2), the hottest loops pick AVX2 at run time (src/core/CpuFeatures.h). About
+      # 8 more minutes of link on the runner; Harmless.cpp stays out of LTO (LYNX_WIN_LTO_SKIP, measured)
       - name: Build (Zig cross compile)
         shell: bash
+        env:
+          LYNX_WIN_OPT: -O2 -Xclang -O3
+          LYNX_WIN_LTO: thin
+        # JOBS=2 (queue 0.1.31 item 46, as plugins.yml and round-build.yml): the hosted runner is memory-bound (round 190ov
+        # measured 11.2 / 16 GB + 2.5 / 3 GB swap at two compiles); one per core ran it out of memory ("lost communication")
         run: |
-          ZIG="$HOME/opt/zig-x86_64-linux-$ZIG_VERSION/zig" JUCE_DIR="$HOME/opt/juce-$JUCE_VERSION" OUT=build-win \
+          ZIG="$HOME/opt/zig-x86_64-linux-$ZIG_VERSION/zig" JUCE_DIR="$HOME/opt/juce-$JUCE_VERSION" OUT=build-win JOBS=2 \
             ./scripts/build-windows-zig.sh 2>&1 | grep -v '^1 warning generated\.$'
           sha256sum build-win/LYNX.exe
           ./scripts/fetch-onnxruntime.sh windows build-win
@@ -236,6 +248,9 @@ jobs:
           $p = Start-Process bin\LYNX.exe -ArgumentList '--showcase', "$PWD\pkg\$name\Demo.lynx" -Wait -PassThru
           if (-not (Test-Path "pkg\$name\Demo.lynx")) { throw "showcase did not write Demo.lynx (exit $($p.ExitCode))" }
           Copy-Item bin\LYNX.exe, bin\onnxruntime.dll, LICENSE, THIRD_PARTY.md, PRIVACY.md "pkg\$name\"
+          # the third-party licence texts (round 190nk): Git for Windows' bash runs the same script as the other packages
+          & "$env:ProgramFiles\Git\bin\bash.exe" scripts/collect-licenses.sh "pkg/$name/licenses"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "pkg\$name\licenses\ara-ARA_API-LICENSE.txt")) { throw "collect-licenses failed" }
           # LYNX ASIO driver and its registration helpers (REA round 97)
           if (Test-Path bin\lynx-asio.dll) { Copy-Item bin\lynx-asio.dll, "asio\Register LYNX ASIO.bat", "asio\Unregister LYNX ASIO.bat" "pkg\$name\" }
           if (Test-Path bin\lynx-asio32.dll) { Copy-Item bin\lynx-asio32.dll "pkg\$name\" }  # 32-bit hosts (round 106)
@@ -247,13 +262,23 @@ jobs:
           $nsis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
           if (-not $nsis) { $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
           if (-not (Test-Path $nsis)) { choco install nsis -y --no-progress; $nsis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe" }
-          & $nsis -V2 -INPUTCHARSET UTF8 "-DVERSION=$env:VERSION" "-DSTAGE=$PWD\pkg\$name" "-DOUTFILE=$PWD\dist\LYNX-$env:LABEL-setup-x64.exe" `
+          $vi = if (($env:VERSION -split '\.').Count -ge 4) { $env:VERSION } else { "$env:VERSION.0" }  # (a hotfix: 0.1.31.1)
+          & $nsis -V2 -INPUTCHARSET UTF8 "-DVERSION=$env:VERSION" "-DVIVERSION=$vi" "-DSTAGE=$PWD\pkg\$name" "-DOUTFILE=$PWD\dist\LYNX-$env:LABEL-setup-x64.exe" `
             "-DICON=$PWD\resources\LYNX.ico" resources\installer\LYNX.nsi
           if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
           # the installer installs and uninstalls cleanly (per user, into a scratch folder)
           $inst = "$env:RUNNER_TEMP\lynx-inst"
           Start-Process "dist\LYNX-$env:LABEL-setup-x64.exe" -ArgumentList '/S', "/D=$inst" -Wait
           if (-not (Test-Path "$inst\LYNX.exe")) { throw "installer did not install LYNX.exe" }
+          # round 190nr: installing over a NEWER version removes what that version's installed-files.txt lists and this
+          # version doesn't own (resources/installer/InstalledFiles.nsh); files that no list names stay
+          if (-not (Test-Path "$inst\installed-files.txt")) { throw "installer did not write installed-files.txt" }
+          New-Item -ItemType Directory "$inst\newer-only" | Out-Null; Set-Content "$inst\newer-only\a.txt" "x"
+          Set-Content "$inst\My notes.txt" "x"; Add-Content "$inst\installed-files.txt" "newer-only"
+          Start-Process "dist\LYNX-$env:LABEL-setup-x64.exe" -ArgumentList '/S', "/D=$inst" -Wait
+          if (Test-Path "$inst\newer-only") { throw "install over a newer version left its newer-only folder" }
+          if (-not (Test-Path "$inst\My notes.txt")) { throw "the installer removed a file no list names" }
+          Remove-Item "$inst\My notes.txt"
           Start-Process "$inst\Uninstall.exe" -ArgumentList '/S', "_?=$inst" -Wait
           if (Test-Path "$inst\LYNX.exe") { throw "uninstaller left LYNX.exe" }
 
@@ -274,7 +299,7 @@ jobs:
           $tools = $sdk.DirectoryName; "Windows SDK tools: $tools"
           $demo = "pkg\LYNX-$env:LABEL-windows-x64\Demo.lynx"
           function Pack($layout, $out, [switch]$test) {
-            $a = @('scripts\make-msix-layout.py', '--version', $env:VERSION, '--bin', 'bin', '--out', $layout, '--extra', $demo, 'LICENSE', 'THIRD_PARTY.md', 'PRIVACY.md')
+            $a = @('scripts\make-msix-layout.py', '--version', $env:VERSION, '--bin', 'bin', '--out', $layout, '--extra', $demo, 'LICENSE', 'THIRD_PARTY.md', 'PRIVACY.md', "pkg\LYNX-$env:LABEL-windows-x64\licenses")
             if ($test) { $a += '--test-identity' }
             python @a; if ($LASTEXITCODE -ne 0) { throw "make-msix-layout failed" }
             & "$tools\makepri.exe" createconfig /cf "$layout.priconfig.xml" /dq en-US_pt-BR_es-ES_fr-FR_de-DE_it-IT_nl-NL_pl-PL_ru-RU_tr-TR_id-ID_ja-JP_ko-KR_zh-CN_zh-TW /pv 10.0.0 /o | Out-Null
@@ -344,6 +369,8 @@ jobs:
     steps:
       - name: Build dependencies (Ubuntu 22.04 + GCC 13 from ppa:ubuntu-toolchain-r/test)
         run: |
+          # (round 190qd) Launchpad's PPA answered 503 on half the requests during the 0.1.31 release: apt retries
+          echo 'Acquire::Retries "30";' > /etc/apt/apt.conf.d/80-lynx-retries
           apt-get update -q
           apt-get install -y -q --no-install-recommends ca-certificates curl git gnupg software-properties-common
           add-apt-repository -y ppa:ubuntu-toolchain-r/test
@@ -388,6 +415,20 @@ jobs:
       - name: Package
         run: ./scripts/package-linux.sh build/LYNX_artefacts/Release/LYNX "$LABEL" dist Demo.lynx
 
+      # round 190rb: the package strips LYNX, so a Linux crash file's LYNX+offset frames had no names (the 0.1.29-0.1.31
+      # reports could not be mapped). The symbol table of this same build, kept apart: `addr2line -f -C -e
+      # LYNX-linux-x86_64.debug 0x<offset>` names a frame (the offsets are the same in the stripped package)
+      - name: Keep the symbols
+        run: objcopy --only-keep-debug build/LYNX_artefacts/Release/LYNX LYNX-linux-x86_64.debug
+
+      - name: Upload symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: LYNX-symbols-linux-x86_64
+          path: LYNX-linux-x86_64.debug
+          retention-days: 90
+          if-no-files-found: warn
+
       # The catalog runs the AppImage offline for ~11 s and expects a window: start it without network (when the
       # container allows a network namespace), check that it is still running and shows a top-level window.
       - name: AppImage starts offline and shows its window
@@ -404,54 +445,27 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # round 190qd: each architecture on its own runner, merged with lipo (one universal job compiled everything twice and
+  # neared GitHub's 6 h job limit); see macos-app.yml
   macos:
-    name: macOS (universal dmg)
+    name: macOS
     needs: version
-    runs-on: macos-15
-    env:
-      LABEL: ${{ needs.version.outputs.label }}
-      VERSION: ${{ needs.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v5
+    permissions:
+      contents: write   # (macos-app.yml's attach job asks for it; it runs only on a manual run of macos-app.yml)
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      label: ${{ needs.version.outputs.label }}
 
-      - name: Build dependencies
-        run: brew list ninja > /dev/null 2>&1 || brew install ninja
-
-      - name: JUCE (checksum verified)
-        run: |
-          curl -fsSL -o juce.tar.gz "https://github.com/juce-framework/JUCE/archive/refs/tags/$JUCE_VERSION.tar.gz"
-          echo "$JUCE_SHA256  juce.tar.gz" | shasum -a 256 -c -
-          mkdir -p "$RUNNER_TEMP/juce" && tar xzf juce.tar.gz -C "$RUNNER_TEMP/juce" --strip-components 1 && rm juce.tar.gz
-
-      - name: Build (universal)
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFETCHCONTENT_SOURCE_DIR_JUCE="$RUNNER_TEMP/juce" \
-            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
-          cmake --build build --target LYNX -- -k 0
-          lipo -info build/LYNX_artefacts/Release/LYNX.app/Contents/MacOS/LYNX
-
-      - name: Self-test and demo project
-        run: |
-          bin=build/LYNX_artefacts/Release/LYNX.app/Contents/MacOS/LYNX
-          "$bin" --selftest "$PWD/selftest.txt" "$PWD/selftest-demo.lynx" || true
-          cat selftest.txt
-          grep -q '^result=OK' selftest.txt
-          "$bin" --showcase "$PWD/Demo.lynx" || true
-          test -s Demo.lynx
-
-      - name: Package
-        run: ./scripts/package-macos.sh build/LYNX_artefacts/Release/LYNX.app "$LABEL" dist Demo.lynx
-
-      - name: Upload package
-        uses: actions/upload-artifact@v7
-        with:
-          name: LYNX-${{ env.LABEL }}-macos-universal
-          path: dist/*
-          if-no-files-found: error
+  linux-arm64:
+    name: Linux arm64
+    needs: version
+    uses: ./.github/workflows/linux-arm64.yml
+    with:
+      label: ${{ needs.version.outputs.label }}
 
   publish:
     name: Checksums and release
-    needs: [version, package, linux, macos]
+    needs: [version, package, linux, macos, linux-arm64]
     if: ${{ !cancelled() && needs.package.result == 'success' && needs.linux.result == 'success' && needs.macos.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
@@ -466,9 +480,17 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # SPDX 2.3 software bill of materials of the third-party components (round 190nr): THIRD_PARTY.md + licenses/.
+      - uses: actions/checkout@v5
+        with:
+          path: src
+      - name: SBOM
+        run: src/scripts/make-sbom.sh "$LABEL" "dist/LYNX-$LABEL-sbom.spdx.json"
+
       # The in-app updater (src/core/UpdateCheck.cpp, round 166b) picks the release files by these names: keep them stable.
       # LYNX-<label>-setup-x64.exe, LYNX-<label>-windows-x64.zip, LYNX-<label>-macos-universal.dmg (any *.dmg),
       # LYNX-<label>-x86_64.AppImage (+ .zsync; versions up to 0.1.24 find it by this name, later ones through scripts/publish-appimage-update.sh), LYNX-<label>-linux-x86_64.tar.gz,
+      # LYNX-<label>-aarch64.AppImage (+ .zsync) and LYNX-<label>-linux-aarch64.tar.gz (Linux arm64, from 0.1.31),
       # and SHA256SUMS.txt, which every download is checked against (no SHA256SUMS.txt line = no update from that file).
       - name: SHA256SUMS
         run: |

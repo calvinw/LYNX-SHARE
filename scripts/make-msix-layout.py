@@ -31,17 +31,20 @@ APP_FILES = ("LYNX.exe", "lynx-asio.dll", "onnxruntime.dll", "LYNX-bridge32.exe"
 
 
 def msix_version(version, store_build=0):
-    """'0.1.20' / '0.1.20-alpha' -> '0.1.200.0'. The Store reserves the fourth part (it must be 0), so a repackaged
+    """'0.1.20' / '0.1.20-alpha' -> '0.1.200.0'; a hotfix '0.1.31.1-alpha' -> '0.1.311.0'. The Store reserves the fourth part (it must be 0), so a repackaged
     build of the same release (a resubmission after a failed certification) needs a higher third part: the third part
     is patch * 10 + store_build (0..9), which keeps every later release above every rebuild (0.1.209 < 0.1.210).
     0.1.20 shipped as 0.1.20.0, below all of these. Each part 0..65535."""
-    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$", version.strip())
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?$", version.strip())
     if not m:
         raise ValueError(f"not a version: {version!r}")
-    if not 0 <= store_build <= 9:
-        raise ValueError(f"store build must be 0..9: {store_build!r}")
-    major, minor, patch = (int(p) for p in m.groups())
-    parts = [major, minor, patch * 10 + store_build]
+    # a hotfix's fourth number ('0.1.31.1' -> '0.1.311.0') takes the rebuild digits from the bottom: a hotfix and its
+    # rebuilds share 1..9 (revision + store_build), still below the next release
+    revision = int(m.group(4) or 0)
+    if not 0 <= store_build <= 9 or not 0 <= revision + store_build <= 9:
+        raise ValueError(f"store build + hotfix number must be 0..9: {store_build!r} + {revision!r}")
+    major, minor, patch = (int(p) for p in m.groups()[:3])
+    parts = [major, minor, patch * 10 + revision + store_build]
     if any(p > 65535 for p in parts):
         raise ValueError(f"version part above 65535: {version!r}")
     return ".".join(str(p) for p in parts) + ".0"
@@ -84,7 +87,10 @@ def main(argv):
         elif name == "LYNX.exe":
             raise SystemExit(f"missing {src}")
     for extra in a.extra:
-        shutil.copy2(extra, a.out)
+        if os.path.isdir(extra):  # a folder (the third-party licence texts, round 190nk) keeps its name
+            shutil.copytree(extra, os.path.join(a.out, os.path.basename(os.path.normpath(extra))), dirs_exist_ok=True)
+        else:
+            shutil.copy2(extra, a.out)
     assets = os.path.join(a.out, "Assets")
     shutil.copytree(os.path.join(ROOT, "resources", "msix", "Assets"), assets)
     if a.loose:

@@ -67,7 +67,7 @@ namespace
 class MaximusEffect final : public Effect
 {
 public:
-    explicit MaximusEffect (const std::vector<std::uint8_t>& slotState)
+    MaximusEffect (const std::vector<std::uint8_t>& slotState, int rev) : engineRev (rev)
     {
         if (const auto blob = unpack (slotState))
             if ((preset = presetOf (*blob)) != nullptr)
@@ -77,7 +77,7 @@ public:
     void prepare (double sampleRate) noexcept override
     {
         if (preset != nullptr)
-            engine.prepare (preset, sampleRate, mix); // allocates; called off the audio thread by the host
+            engine.prepare (preset, sampleRate, mix, engineRev); // allocates; called off the audio thread by the host
     }
 
     void reset() noexcept override { engine.reset(); }
@@ -88,17 +88,25 @@ public:
     }
 
     int latencySamples() const noexcept override { return engine.latencySamples(); }
+    // round 190oa (DP-27): the Monitor's band levels (output 2b = band b's input peak, 2b + 1 its output; band 3 = the
+    // master), the block's loudest; only while an editor shows them
+    void setMetersShown (bool shown) noexcept override { engine.setMetering (shown); }
+    float controlOutput (int output) const noexcept override
+    {
+        return output >= 0 && output < 8 ? engine.bandPeak (output / 2, (output & 1) != 0) : 0.0f;
+    }
 
 private:
     std::shared_ptr<const hlfx::MaximusPreset> preset;
     int mix = 1000;
+    int engineRev = 0; // EffectSlot::engineRev (round 190kz)
     hlfx::MaximusProcessor engine;
 };
 } // namespace
 
-std::unique_ptr<Effect> make (const std::vector<std::uint8_t>& slotState)
+std::unique_ptr<Effect> make (const std::vector<std::uint8_t>& slotState, int engineRev)
 {
-    return std::make_unique<MaximusEffect> (slotState);
+    return std::make_unique<MaximusEffect> (slotState, engineRev);
 }
 // --- editing -----------------------------------------------------------------------------------------------
 

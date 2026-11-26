@@ -32,6 +32,7 @@
 // A caught crash leaves the plugin in an unknown state: the caller must never call that instance again (PluginEffect /
 // PluginInstrument switch to bypass / silence and report it, engine/PluginHost.h).
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <type_traits>
@@ -51,7 +52,8 @@ std::uint32_t run (Fn&& fn) noexcept
 // This build catches a plugin's faults in call() (Windows SEH; Linux / macOS on x86-64 / ARM64 signals)
 bool pluginFaultsCaught() noexcept;
 
-// Round 190gg (B4): faults on a hosted plugin's OWN threads (Linux / macOS on x86-64 / ARM64; the app only, not the
+// Round 190gg (B4): faults on a hosted plugin's OWN threads (Linux / macOS on x86-64 / ARM64; Windows x64 since round
+// 190oh, see parkFaultingPluginThread; the app only, not the
 // exported plugins' runtime; nothing on Windows). A thread the plugin started (its GUI renderer, a disk streamer, a
 // licence check) runs no LYNX call, so call() cannot catch its fault. The handler of call() now also looks at a fault
 // outside every guarded call: when, from the faulting instruction to the thread's first frame (which the walk must
@@ -64,6 +66,12 @@ bool pluginFaultsCaught() noexcept;
 // start, in a module nobody watches, or while another fault is being looked at.
 // watchPluginModule: message thread, after the module was loaded in this process (an absolute path; at most 128).
 void watchPluginModule (const std::string& fileUtf8) noexcept;
+// Round 190oh: the same on Windows (x64). There the fault of a plugin's own thread reaches the top-level filter only
+// when nothing of the plugin's handled it; the crash handler (Main.cpp onCrash) calls this first: when the fault is a
+// watched plugin's thread's (the rules above, plus a walk to the thread's first frame in ntdll), it is noted and the
+// thread waits forever inside this call; otherwise false and the crash handler goes on. Elsewhere always false (the
+// signal handler parks the thread before any crash handler runs).
+bool parkFaultingPluginThread (void* exceptionPointers) noexcept;
 bool pluginThreadFaultsCaught() noexcept;
 struct PluginThreadFault
 {
@@ -175,6 +183,38 @@ std::uint32_t faultInGuardedCallForTest (bool inCLibrary) noexcept;
 // "module+0xoffset" of one code address ("" when unknown)
 std::string describeAddress (const void* address);
 
+// Crash handler watchdog (rollup 0.1.30 step 12, owner decision after round 190mo). The crash handler writes a file and
+// saves the project: both allocate. After the C library's heap-corruption abort (glibc aborts while it holds the
+// arena's lock) the first allocation waits for that lock for ever, so a crash became a hang (25 minutes until a test's
+// timeout). Now:
+// - prepareCrashWatchdog (startup, message thread, after the crash handler is installed): the folder the handler writes
+//   to, the time limit (60 s; LYNX_CRASH_WATCHDOG_S = 1 … 600 for tests), Windows' idle watchdog thread, a first
+//   backtrace() (the C library loads its unwinder then, which allocates). setCrashFolder: another folder (--faulttest).
+// - armCrashWatchdog: the FIRST thing the crash handler does. Linux / macOS: alarm() with SIGALRM back at its default
+//   action and unblocked on this thread (the kernel ends the process; async-signal-safe); Windows: wakes the thread
+//   prepared above, which ends the process with the crash's code (TerminateProcess) after the time limit. Whatever the
+//   handler then does, the process is gone within the limit.
+// - heapCorruptionCrash: the crash is the C library's own abort — Linux: SIGABRT whose abort() was called from inside
+//   libc itself (its heap checks; also its fortify checks, which mean a damaged memory too), macOS: SIGABRT with a frame
+//   in libsystem_malloc; Windows: STATUS_HEAP_CORRUPTION (0xC0000374). Allocation-free (backtrace + dladdr on a fixed
+//   array). A C++ terminate, LYNX's or a plugin's own abort() keep the usual handling.
+// - writeHeapCrashFile: for that case, the crash file without the heap: "crash heap-corruption <time>.txt" in the
+//   prepared folder, written with open / write and the frames by backtrace_symbols_fd (Windows: CreateFileW / WriteFile,
+//   the exception code only). The caller then skips everything that allocates (the usual crash file, the session note,
+//   the emergency save: the project in memory may be what the corruption broke).
+void prepareCrashWatchdog (const std::string& crashFolderUtf8) noexcept;
+void setCrashFolder (const std::string& crashFolderUtf8) noexcept;
+int crashWatchdogSeconds() noexcept;
+void armCrashWatchdog (void* exceptionPointers) noexcept;
+bool heapCorruptionCrash (void* exceptionPointers) noexcept;
+void writeHeapCrashFile (void* exceptionPointers) noexcept;
+// --faulttest heap / hang (tests of the above): `heap` breaks a heap chunk's header and frees its neighbour, so the C
+// library aborts inside free() holding the arena lock (Linux; macOS: frees a pointer it never handed out); `hang`
+// makes the crash handler wait for ever after it armed the watchdog (setHangInCrashHandlerForTest), then faults.
+[[noreturn]] void heapCorruptionForTest() noexcept;
+void setHangInCrashHandlerForTest() noexcept;
+bool hangInCrashHandlerForTest() noexcept;
+
 // UI hang watch (round 157a). A frozen message thread leaves no crash file: Windows shows "not responding" and the
 // user closes LYNX. startHangWatch (on the message thread) starts a watcher thread; heartbeat() (the message thread,
 // from a timer, several times a second) proves the UI is alive. When no heartbeat arrives for `stallMs`, the watcher
@@ -206,4 +246,12 @@ std::string lastHangFile();
 // named with LYNX.pdb next to it; system DLLs by their nearest export or module). Other platforms: nothing.
 void startMainProfiler (const std::string& fileUtf8, int intervalUs = 1000, int windowS = 5) noexcept;
 void stopMainProfiler() noexcept;
+
+// Round 190os (--uiperf with LYNX_UIPERF_STALLS=<folder>): a wall-clock sampler for frame stalls. Called on the message
+// thread: every `intervalUs` a time-critical thread records the CPU cycles every thread of this process ran since the
+// last sample, the stacks of the message thread and of the threads whose name contains one of `stackNames` (sampled
+// by copy, as the profiler above, whether they run or wait), and `*tag` (the safe-overload guard's state).
+// stopStallSampler writes them to the file (format in CrashGuard.cpp). Windows x64 only; elsewhere nothing.
+void startStallSampler (const std::vector<std::string>& stackNames, int intervalUs, const std::atomic<int>* tag) noexcept;
+void stopStallSampler (const std::string& fileUtf8) noexcept;
 } // namespace lynx::crashguard

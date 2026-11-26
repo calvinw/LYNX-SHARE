@@ -19,6 +19,11 @@ public:
     bool active() const noexcept;
     juce::File discoveryFile() const;
 
+    // Round 190np (LYNX --demo, ui/DemoMode.h): more operations, run by `handler` on the message thread like the others
+    // (view operations of the window: they take no project guards). Listed by api.describe while set. Message thread.
+    using Extension = std::function<juce::var (const juce::String& op, const juce::var& args)>;
+    static void setExtension (juce::StringArray operations, Extension handler);
+
     // What `ui.select` and `project.save` need from the window (message thread only). Absent hooks make those
     // operations report that they are unavailable. Set once by the app; shared by every RemoteControl instance.
     struct UiHooks

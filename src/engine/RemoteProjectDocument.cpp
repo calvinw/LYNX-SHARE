@@ -49,31 +49,40 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
             for (const auto& name : juce::StringArray::fromTokens (names, " ", ""))
                 result[owner].emplace (name, DocumentField { child, array });
         };
-        add (S::root, "bpm beatsPerBar swing chanceSeed channelGroups masterPitch substitutesBypassed cleanMixer performanceMode "
+        add (S::root, "bpm beatsPerBar swing chanceSeed channelGroups masterPitch mainVolume substitutesBypassed cleanMixer performanceMode crossfader crossfadeCurve "
              "autoCrossfades compCrossfadeMs playTruncatedNotes fastDeclick panLaw autoPdc compensateAutomations timeSettings "
              "scaleHighlight dataFolder currentPattern playlist patternBlocks blocks playlistTracks playlistTrackHeights "
-             "playlistTrackColours playlistTrackGroups playlistCompTracks playlistTrackLocks playlistTrackLanes "
+             "playlistTrackColours playlistTrackGroups playlistCompTracks playlistTakeLanes playlistTrackLocks playlistTrackSoloLocks playlistTrackLanes "
              "playlistTrackModes playlistTrackPerformance playlistTrackIcons currentArrangement mode loop arrangementUids midiLinks initialValues");
         // Fields of 0.1.26..0.1.28 (round 190ha): the meter's unit, Master look, mixer/plugin laws, chord pad, MIDI Tools,
         // folded tracks, the loop switch and the tempo lane's range
         add (S::root, "beatUnit masterLook muteRunsEffects patternClipTakeover mutedInsertsSkip pluginLevels keyboardChords midiGenerate "
              "playlistTracksFolded loopOff tempoView");
+        add (S::root, "playlistTracksHidden"); // (round 190op, P4: hidden Playlist tracks)
+        add (S::root, "trackRange automationWriteMode"); // (round 190pa: P14 range on chosen tracks, P21 automation write mode)
         // rollup 0.1.28: the fields merged after round 190ha's base — 190gw's default row height, 190gz's link switch
         // (editable), 190gx's Beats-law mark (what the file was saved by) and 190gw's automation target links (read-only:
         // formulas and targets, as remoteMappings)
         add (S::root, "playlistRowHeight linkTracksToMixer");
+        add (S::root, "slideNoteProps"); // (issue #236, round 190od: slide notes move the note properties)
         add (S::root, "beatsLaw190gx", S::readOnly);
+        add (S::root, "warpLaw190ik", S::readOnly); // (round 190ik: the Beats detector / Texture / Complex Pro laws' mark)
+        add (S::root, "clipNotes190lq", S::readOnly); // (round 190lq: FL's law for the notes of audio clip channels' mark)
         add (S::root, "sfModBase190he", S::readOnly); // (round 190he: the mark of a song saved with the real Soundfont modulator centre)
+        add (S::root, "windowLayout", S::readOnly); // (round 190mr, DF-141: each user's own window layout, never merged)
+        add (S::root, "mixerLevelPdc190hq"); // (round 190hq: Mixer › Plugin delay compensation › compensate fader and route automations)
         add (S::root, "format version savedBy projectId nextUid session clipFadesPerClip", S::readOnly);
         // Not reviewed for document edits (yet): the groove pool (its ids are clip references), controller mappings
         // (formulas, ports, targets). They pass through unchanged; edit them in LYNX.
         add (S::root, "grooves midiLinkSettings midiNoteLinks remoteMappings", S::readOnly);
+        add (S::root, "mixSnapshots", S::readOnly); // (round 190hp: the Mixer menu's Mix snapshots; edit them in LYNX)
         add (S::root, "clipEnvelopes", S::clipEnvelope, true);
         add (S::root, "info", S::info);
         add (S::root, "channels", S::channel, true);
         add (S::root, "patterns", S::pattern, true);
         add (S::root, "automations", S::automation, true);
         add (S::root, "modulators", S::modulator, true);
+        add (S::root, "modulators190ox", S::modulator, true); // (round 190ox: the modulators stage 2 kinds)
         add (S::root, "vcas", S::vca, true);
         add (S::root, "mixer", S::mixer, true);
         add (S::root, "video", S::video);
@@ -82,9 +91,10 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
         add (S::root, "arrangements", S::arrangement, true);
         add (S::info, "title author genre comments");
         add (S::info, "url showOnOpen created workSeconds", S::readOnly);
-        add (S::channel, "name instrument volume pan muted ghostHidden soloLock sample controllerState pluginState modelParams zones "
+        add (S::channel, "name instrument volume pan muted ghostHidden soloLock zipped sample controllerState pluginState modelParams zones "
              "mixer maxPolyphony colour group swingMix arp cut keyRegion receiveFrom icon editorScale flWrapperFlags loopStarter uid "
-             "cutOthersOnly cutAtNoteEnd simplePad");
+             "cutOthersOnly cutAtNoteEnd simplePad engineRev smartDisable"); // (engineRev: natives190kj, rollup step 6; smartDisable: round 190ok)
+        add (S::channel, "deactivated"); // (round 190op, P4)
         add (S::channel, "freeze trackFreeze", S::readOnly); // (rendered stems: files LYNX wrote, and the live channel)
         add (S::channel, "plugin", S::plugin);
         add (S::channel, "flOrigin", S::origin);
@@ -99,7 +109,7 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
         add (S::plugin, "id name state foreign fixedBuffers separateProcess threaded maxSizeBuffers allowSmartDisable hostMaxBuffer "
              "midiInPort midiOutPort notifyRender latencyMs releaseVelocity sendBendRange bendRange modXAftertouch "
              "allNotesOffOnStop resetOnFlush sendLoopPosition allowHostKeys hostKeysFirst bitSize detached outputs "
-             "mpe processInactive inputs pinnedOnTop velocityMode fixedVelocity");
+             "mpe processInactive inputs pinnedOnTop velocityMode fixedVelocity recordOwnNotes dpiAware scaleEditorDimensions");
         // Online Sessions: the participant whose LYNX plays the plugin, and the values it shares
         add (S::plugin, "playedBy values", S::readOnly);
         add (S::origin, "plugin state print");
@@ -110,19 +120,21 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
         add (S::synth, "osc spectrum spectrumPhase spectrumDecay spectrumTarget adsr filter ladder chorus stereoTremolo vibratoCents "
              "mono porta portaTime am ring keyTrack bands sweep sweepTime fm filterEnv pitchEnv lfo");
         add (S::sampler, "pitch attack decay sustain release stretchBeats keepPitch stretchMethod flStretchMode flStretchPitch stretchPitch "
-             "warp region startOffset slices reverse cut porta portaTime filter gainDb useLoopPoints flVelocityLaw declickMode "
+             "warp region startOffset slices reverse cut porta portaTime filter gainDb useLoopPoints flVelocityLaw clipNoteLegacy declickMode "
              "flVolumeEnvelope flChannel filterEnv pitchEnv lfo loopKey warpModes stretchMul loopStart loopEnd keepOnDisk resample "
              "loadRegions loadSliceMarkers flmPad");
         add (S::sampler, "precomputed", S::precomputed);
         add (S::precomputed, "removeDc normalize reversePolarity fadeStereo swapStereo pingPong fadeIn fadeOut crossfade trim "
              "boost eq ringMix ringFreq stereoDelay cutoff resonance reverb reverbType pogo clip");
-        add (S::mixer, "name volume pan muted solo soloSources threaded separator folded dock toMaster masterLevel colour stereo "
+        add (S::mixer, "name volume pan muted solo soloSources lockState threaded separator folded dock toMaster masterLevel colour stereo "
              "invertPhase swap input inputMono monitor recordSafe recordTo recordSource recordDryToo latencyMs latencyBypass "
-             "compensateMaster icon output outputMode eq eqBypassed sends lostSends preSends chainBlend chainPreset");
+             "compensateMaster icon output outputMode eq eqBypassed sends lostSends preSends chainBlend chainPreset "
+             "liveReturn returnPre returnSendsOn crossfade smartControls"); // (smartControls: 190ke, rollup step 6)
+        add (S::mixer, "deactivated"); // (round 190op, P4)
         add (S::mixer, "effects", S::effect, true);
         add (S::mixer, "standIns", S::standIn, true);
         add (S::effect, "kind on params sendSpan mix smartDisable row sidechain sidechain2 sendTransient sendSustain state sample preset abOther abB "
-             "look goal goalAmount");
+             "look goal goalAmount lockState engineRev"); // (engineRev: round 190kz)
         add (S::effect, "plugin substituteFor", S::plugin);
         add (S::effect, "flOrigin", S::origin);
         add (S::effect, "patcher", S::patcher);
@@ -141,12 +153,13 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
         add (S::busHead, "bus gain");
         add (S::busHead, "head", S::effect);
         add (S::standIn, "pattern loop path hash length plugin by");
-        add (S::pattern, "name uid length colour loopOn loopStarterGenre loopMode channelLoops markers notes");
+        add (S::pattern, "name uid length colour loopOn loopStarterGenre loopMode channelLoops markers notes autoNotes"); // (autoNotes: round 190ow)
         add (S::pattern, "events", S::events, true);
         add (S::events, "target events");
-        add (S::automation, "name uid target points source curve lfo lfoFl recordLive");
+        add (S::automation, "name uid target points source curve lfo lfoFl recordLive colour tempoMarkers rackSlot range muted"); // (range, muted: round 190ow)
         add (S::automation, "links", S::readOnly);
         add (S::modulator, "name shape sync beats hz phase unipolar seed routes");
+        add (S::modulator, "at host kind input attack decay sustain release gain steps glide smooth macro"); // (round 190ox)
         add (S::vca, "name colour level muted members parent");
         add (S::video, "rate startTimecode rateFromVideo timecodeRuler burnIn");
         add (S::video, "tracks", S::videoTrack, true);
@@ -163,8 +176,8 @@ const DocumentFields& editableDocumentFields (DocumentShape shape)
         add (S::grid, "quant backOnStop followActions mixerView");
         add (S::grid, "scenes", S::scene, true);
         add (S::grid, "clips", S::gridClip, true);
-        add (S::scene, "name colour tempo beatsPerBar beatUnit");
-        add (S::gridClip, "scene name colour mode quant legato loop noStop follow clip blankName groove");
+        add (S::scene, "name colour tempo beatsPerBar beatUnit follow");
+        add (S::gridClip, "scene name colour mode quant legato loop noStop follow clip blankName groove inactive");
         add (S::arrangement, "name clips blocks loop markers");
         add (S::clipEnvelope, "volume pan shown");
         return result;

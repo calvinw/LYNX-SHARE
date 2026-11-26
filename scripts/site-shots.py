@@ -40,32 +40,35 @@ from PIL import Image, ImageDraw
 # Home / Features pictures: name -> (render, crop box at 1x or None)
 TOP = {
     "hero": ("snap/s-desktop-all.png", None),       # Channel Rack, Piano Roll, Playlist and Mixer (the page's alt text)
-    "playlist": ("snap/s-playlist.png", None),
+    "playlist": ("snap/s-playlist-fit.png", None),  # (round 190nr: the song zoomed to fit; --snapshot's -playlist-fit.png)
     "pianoroll": ("snap/s-pianoroll.png", None),
     "mixer": ("snap/s-mixer.png", None),
     "rack": ("snap/s-rack.png", (0, 0, 1074, 420)),
     "automation": ("snap/s-automation.png", None),
     "synth": ("snap/s-synth.png", None),
     "eq": ("art/facet-eq-after", None),
-    "cliplaunch": ("grid/g-both.png", None),
+    # (round 190qd: the clip grid, scenes and Playlist only: the demo grid's tracks have no mixer inserts, so the Session
+    # mixer below them would show only "No mixer track" strips)
+    "cliplaunch": ("grid/g-both.png", (0, 0, 1920, 573)),
 }
 # the README's pictures (docs/img/<name>.png): the 1600 x 900 window for the wide ones, as the README had them
 README_PICTURES = {
     "workspace": ("snap1600/s-desktop-all.png", None),  # the same four windows as the hero (the README's caption)
-    "playlist": ("snap/s-playlist.png", (150, 75, 1920, 800)),
+    # (the part with the song: since 0.1.30 the Playlist opens at FL's default zoom, the demo fills its first fifth)
+    "playlist": ("snap/s-playlist.png", (0, 75, 1000, 482)),
     "channel-rack": ("snap/s-rack.png", (0, 0, 1074, 420)),
     "piano-roll": ("snap1600/s-pianoroll.png", None),
     "mixer": ("snap1600/s-mixer.png", None),
     "synth": ("snap/s-synth.png", None),
     "eq": ("art/facet-eq-after", None),
     "automation": ("snap/s-automation.png", None),
-    "clip-launch": ("grid1600/g-both.png", None),
+    "clip-launch": ("grid1600/g-both.png", (0, 0, 1600, 393)),  # (the grid part, as "cliplaunch" above)
 }
 # the Microsoft Store listing's screenshots (store/screenshots/<name>.png, 1920 x 1080, 1x only); 05-instruments-effects is
 # put together by hand (Channel Rack + a synth + Parametric EQ) and is not written here
 STORE = {
     "01-workspace": "snap/s-desktop-all.png",
-    "02-playlist": "snap/s-playlist.png",
+    "02-playlist": "snap/s-playlist-fit.png",
     "03-piano-roll": "snap/s-pianoroll-narrow150.png",
     "04-mixer": "snap/s-mixer.png",
 }

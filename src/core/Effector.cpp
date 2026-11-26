@@ -1,4 +1,5 @@
 #include "core/Effector.h"
+#include "core/KiloheartsDsp.h"
 
 #include <algorithm>
 #include <array>
@@ -236,7 +237,7 @@ private:
 class Effector final : public Effect
 {
 public:
-    Effector()
+    explicit Effector (bool kiloheartsLaw = false, int kiloheartsLatency = 0) : khsBuffers (kiloheartsLaw), khsLatency (kiloheartsLatency)
     {
         delayLine[0].assign ((std::size_t) (1.5 * maxRate) + 8, 0.0f);
         delayLine[1].assign (delayLine[0].size(), 0.0f);
@@ -250,6 +251,7 @@ public:
     {
         fs = std::min (sr, maxRate);
         rev.prepare (fs);
+        khs.prepare (fs, khsBuffers); // round 190nb: the Kilohearts laws' buffers, only for a slot created with one
         reset();
     }
 
@@ -285,14 +287,24 @@ public:
             b.z1[0] = b.z1[1] = b.z2[0] = b.z2[1] = 0.0;
         wetSmooth = -1.0f;
         rev.reset();
+        khs.reset();
     }
 
     void setSongPosition (double ticks) noexcept override { songBeats = ticks / ppq; }
+    // round 190nh: a Kilohearts law's latency (the Comb Filter's 7 samples), fixed when the slot is created
+    int latencySamples() const noexcept override { return khsLatency; }
 
     void process (float* l, float* r, int n, const EffectParams& p, double bpm) noexcept override
     {
         if (p[bypass] != 0.0f || n <= 0)
             return;
+        // round 190nb: a Kilohearts snapin's law (hidden; 0 = FL's Effector, every project saved before)
+        if (const auto law = khsdsp::lawOf (p[(std::size_t) khsdsp::lawParam]); law != khsdsp::Law::none)
+        {
+            khs.setSongBeats (songBeats);
+            khs.process (law, l, r, n, p.data(), clamp01 (p[wetMix]), bpm);
+            return;
+        }
 
         const auto kind = typeOf (p[type]);
         const auto x = clamp01 (p[paramX]), y = clamp01 (p[paramY]);
@@ -734,6 +746,9 @@ private:
     std::array<Biquad, 8> vowel {};
     float wetSmooth = -1.0f;
     EffectorReverb rev;
+    bool khsBuffers = false;
+    int khsLatency = 0;
+    khsdsp::Engine khs;
 };
 } // namespace
 
@@ -778,8 +793,8 @@ std::string formatParam (int param, float v, double bpm)
     }
 }
 
-std::unique_ptr<Effect> make()
+std::unique_ptr<Effect> make (bool kiloheartsLaw, int kiloheartsLatency)
 {
-    return std::make_unique<Effector>();
+    return std::make_unique<Effector> (kiloheartsLaw, kiloheartsLatency);
 }
 } // namespace lynx::effector

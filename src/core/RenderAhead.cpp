@@ -129,6 +129,9 @@ struct RenderAhead::Entry
     int samples = 0;
     bool playing = false;
     std::array<float, 2 * maxMixerTracks> peaks {}; // [i * 2 + side]: the i-th insert of the part rendered ahead
+    // round 190lr (DL-108): the blocks' sums of squares and their frames, kept only while the Session mixer's RMS bars show
+    std::array<float, 2 * maxMixerTracks> power {};
+    std::array<int, maxMixerTracks> powerFrames {};
 };
 
 struct RenderAhead::Partition
@@ -170,6 +173,7 @@ RenderAhead::RenderAhead (RackRenderer& liveRenderer)
     ahead->shareTimesWith (live);
     ahead->setLiveInput (aheadInput.get());
     ahead->setHostTimeline (aheadTimeline.get());
+    live.setPropsMirror (ahead.get()); // (round 190ql: the live renderer's per-channel note blocks, made here too)
     for (int e = 0; e < maxEntries; ++e)
         entries.push_back (std::make_unique<Entry>());
 }
@@ -180,6 +184,7 @@ RenderAhead::~RenderAhead()
     wake->release();
     if (worker.joinable())
         worker.join();
+    live.setPropsMirror (nullptr);
 }
 
 void RenderAhead::setWorkerPool (WorkerPool* p, std::function<void()> onThreadStart)
@@ -225,6 +230,12 @@ void RenderAhead::setOverriddenSlots (const std::vector<int>& slots) noexcept
 {
     live.setOverriddenSlots (slots);
     ahead->setOverriddenSlots (slots);
+}
+
+void RenderAhead::setKeepReleasedOnPlay (bool keep) noexcept
+{
+    live.setKeepReleasedOnPlay (keep);
+    ahead->setKeepReleasedOnPlay (keep);
 }
 
 void RenderAhead::setReleasedSlots (const std::vector<int>& slots) noexcept
@@ -429,6 +440,23 @@ bool RenderAhead::computePartition (const RackState& state, const Block& block, 
             if (route.source == a && route.slot >= 0 && (std::size_t) route.slot < song.automations.size())
                 for (int k = 0, n = unitOf (song.automations[(std::size_t) route.slot].target, units); k < n; ++k)
                     unite (source, units[k]);
+    }
+
+    // round 190ox: a follower's insert / an envelope's channel and what the modulator drives stay on one side (the state
+    // lives in the renderer that runs the source)
+    for (const auto& route : state.modRoutes)
+    {
+        if ((std::size_t) route.modulator >= state.modFeeds.size() || (std::size_t) route.modulator >= song.modulators.size())
+            continue;
+        const auto& feed = state.modFeeds[(std::size_t) route.modulator];
+        const auto source = feed.track >= 0 ? (okTrack (feed.track) ? track (feed.track) : -1) : (feed.channel >= 0 && okChannel (feed.channel) ? feed.channel : -1);
+        if (source < 0)
+            continue;
+        int units[2] {};
+        const auto& mod = song.modulators[(std::size_t) route.modulator];
+        for (const auto& r : mod.routes)
+            for (int k = 0, n = unitOf (r.target, units); k < n; ++k)
+                unite (source, units[k]);
     }
 
     // --- the closure: a group with a live member is live; whatever a live unit feeds is live
@@ -742,6 +770,7 @@ void RenderAhead::wakeThread() noexcept
 void RenderAhead::threadLoop (std::function<void()> onStart)
 {
     const ScopedFlushDenormals noDenormals;
+    WorkerPool::nameCurrentThread ("LYNX render-ahead"); // (round 190kb)
     if (onStart)
         onStart();
     while (! quit.load (std::memory_order_acquire))
@@ -791,6 +820,7 @@ void RenderAhead::threadLoop (std::function<void()> onStart)
         const auto jobNs = ProcessTimes::now() - jobStart;
         aheadCpuNs.fetch_add (WorkerPool::threadCpuNs() - jobCpu, std::memory_order_relaxed);
         aheadBusyNs.fetch_add (jobNs, std::memory_order_relaxed);
+        counters.aheadNs.fetch_add (jobNs, std::memory_order_relaxed); // (round 190of: the split CPU meter)
         if (useWorkers)
             ++jobsSinceSerial;
         else if (sb.samples > 0 && model.sampleRate > 0.0)
@@ -838,6 +868,12 @@ void RenderAhead::harvestMeters (Entry& entry) noexcept
             const auto a = m.takePeak (t, side), v = m.takeViewPeak (t, side), s = m.takeSessionPeak (t, side);
             entry.peaks[(std::size_t) (i * 2 + side)] = std::max ({ a, v, s });
         }
+        float pl = 0.0f, pr = 0.0f;
+        int frames = 0;
+        m.takePowerSums (t, pl, pr, frames); // (round 190lr: zeros while nobody wants them)
+        entry.power[(std::size_t) (i * 2)] = pl;
+        entry.power[(std::size_t) (i * 2 + 1)] = pr;
+        entry.powerFrames[(std::size_t) i] = frames;
     }
 }
 
@@ -845,11 +881,16 @@ void RenderAhead::replayMeters (const Entry& entry, MeterBank* meters) noexcept
 {
     if (meters == nullptr)
         return;
+    const auto power = meters->powerWanted.load (std::memory_order_relaxed);
+    aheadMeters->powerWanted.store (power, std::memory_order_relaxed); // (round 190lr: the part rendered ahead sums them too)
     for (int i = 0; i < current->aheadTrackCount; ++i)
     {
         const auto l = entry.peaks[(std::size_t) (i * 2)], r = entry.peaks[(std::size_t) (i * 2 + 1)];
         if (l > 0.0f || r > 0.0f)
             meters->accumulate (current->aheadTrackList[(std::size_t) i], l, r);
+        if (power && entry.powerFrames[(std::size_t) i] > 0)
+            meters->accumulatePower (current->aheadTrackList[(std::size_t) i], entry.power[(std::size_t) (i * 2)], entry.power[(std::size_t) (i * 2 + 1)],
+                                     entry.powerFrames[(std::size_t) i]);
     }
 }
 
@@ -934,11 +975,36 @@ void RenderAhead::process (SnapshotExchange<RackState>& exchange, const Block& b
     processBlock (exchange, b, left, right, liveQueue, meters, moreLive);
     const auto cpu = (double) (WorkerPool::threadCpuNs() - cpu0);
     account ((double) (ProcessTimes::now() - wall0), cpu, b.samples, b.playing, liveState);
+    // round 190of (P24): the live part's share (the callback's own time here) for the split CPU meter
+    if (b.model != nullptr && b.samples > 0 && sampleRate > 0.0)
+    {
+        counters.liveNs.fetch_add (ProcessTimes::now() - wall0, std::memory_order_relaxed);
+        counters.audioNs.fetch_add ((std::uint64_t) ((double) b.samples / sampleRate * 1.0e9), std::memory_order_relaxed);
+    }
 }
 
 bool RenderAhead::renderAheadAllowed() const noexcept
 {
     return alwaysEngage || probe == Probe::on || probe == Probe::decidedOn;
+}
+
+RenderAhead::ProbeVerdict RenderAhead::probeVerdict (double cpuShareOff, double cpuShareOn, double overRateOff, double overRateOn) noexcept
+{
+    ProbeVerdict v;
+    const auto fewerOverruns = overRateOn <= overRateOff * probeOverrunGain && overRateOff > 0.0;
+    const auto muchFewer = overRateOn <= overRateOff * probeMuchFewer && overRateOff > 0.0;
+    const auto lessCpu = cpuShareOn <= cpuShareOff * probeCpuGain;
+    // kept for a CPU win beyond the probe's measuring error (about ten points in render-ahead's favour against whole
+    // runs) with no more overruns. Since the owner's 0.1.28 decision (`favourFewerOverruns`) also for clearly fewer
+    // overruns at no more than probeCpuMargin more CPU (synth100, Exoplanet: 5-20x fewer), and since 0.1.30 for at
+    // least 4x fewer at no more than probeCpuMarginMuchFewer.
+    const auto cpuWin = lessCpu && overRateOn <= overRateOff;
+    const auto forOverruns = favourFewerOverruns
+                             && ((fewerOverruns && cpuShareOn <= cpuShareOff * probeCpuMargin)
+                                 || (muchFewer && cpuShareOn <= cpuShareOff * probeCpuMarginMuchFewer));
+    v.keep = cpuWin || forOverruns;
+    v.forOverruns = v.keep && ! cpuWin;
+    return v;
 }
 
 void RenderAhead::account (double wallNs, double cpuNs, int samples, bool playing, const RackState* state) noexcept
@@ -1019,19 +1085,16 @@ void RenderAhead::account (double wallNs, double cpuNs, int samples, bool playin
                 counters.probeCpuOn.store ((float) (100.0 * cpuShareOn), std::memory_order_relaxed);
                 counters.probeOverOff.store ((float) (60.0 * overRateOff), std::memory_order_relaxed);
                 counters.probeOverOn.store ((float) (60.0 * overRateOn), std::memory_order_relaxed);
-                const auto fewerOverruns = overRateOn <= overRateOff * probeOverrunGain && overRateOff > 0.0;
-                const auto lessCpu = cpuShareOn <= cpuShareOff * probeCpuGain;
-                // (kept for a CPU win beyond the probe's measuring error — about ten points in render-ahead's favour
-                // against whole runs — with no more overruns; and, since the owner's 0.1.28 decision
-                // (`favourFewerOverruns`), for clearly fewer overruns at no more than probeCpuMargin more CPU: synth100,
-                // Exoplanet: 5-20x fewer.)
-                const auto keep = (lessCpu && overRateOn <= overRateOff) || (favourFewerOverruns && fewerOverruns && cpuShareOn <= cpuShareOff * probeCpuMargin);
+                const auto verdict = probeVerdict (cpuShareOff, cpuShareOn, overRateOff, overRateOn);
+                const auto keep = verdict.keep;
                 probe = keep ? Probe::decidedOn : Probe::decidedOff;
                 // (a project that keeps losing is probed less and less often: the probe's own "on" windows cost)
                 decidedLeft = keep ? decidedSeconds : offHold;
                 offHold = keep ? decidedSeconds : std::min (600.0, offHold * 2.0);
                 decidedState = state != nullptr ? state->serial : 0;
                 (keep ? counters.keptOn : counters.keptOff).fetch_add (1, std::memory_order_relaxed);
+                if (verdict.forOverruns)
+                    counters.keptForOverruns.fetch_add (1, std::memory_order_relaxed);
                 if (! keep)
                     drain.store (true, std::memory_order_release);
             }

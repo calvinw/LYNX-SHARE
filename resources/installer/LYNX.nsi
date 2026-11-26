@@ -14,6 +14,7 @@ ManifestDPIAware true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "Sections.nsh"
+!include "TextFunc.nsh"
 
 !define APP "LYNX SHARE" ; the product name shown (v0.1.20 rename); folders, keys and LYNX.exe keep "LYNX"
 !define PROGID "LYNX.Project"
@@ -25,7 +26,12 @@ OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\Programs\LYNX"
 InstallDirRegKey HKCU "Software\LYNX" "InstallDir"
 BrandingText "LYNX SHARE ${VERSION}"
+; a hotfix's version has four numbers already (0.1.31.1): the callers pass VIVERSION, four numbers either way
+!ifdef VIVERSION
+VIProductVersion "${VIVERSION}"
+!else
 VIProductVersion "${VERSION}.0"
+!endif
 VIAddVersionKey "ProductName" "LYNX SHARE"
 VIAddVersionKey "FileDescription" "LYNX SHARE installer"
 VIAddVersionKey "ProductVersion" "${VERSION}"
@@ -86,16 +92,22 @@ FunctionEnd
     ${EndIf}
 !macroend
 
+!include "InstalledFiles.nsh" ; round 190nr: installed-files.txt, removing a newer version's leftovers
+
 Section "!$(SecApp)" SecMain
     SectionIn RO
     SetShellVarContext current
     !insertmacro CheckNotRunning
     SetOutPath "$INSTDIR"
+    Call RemoveNewerLeftovers
     File "${STAGE}\LYNX.exe"
     File /nonfatal "${STAGE}\onnxruntime.dll" ; Extract stems from sample
     File "${STAGE}\LICENSE"
     File "${STAGE}\THIRD_PARTY.md"
     File /nonfatal "${STAGE}\PRIVACY.md"
+    SetOutPath "$INSTDIR\licenses" ; third-party licence texts (scripts/collect-licenses.sh, round 190nk)
+    File /nonfatal /r "${STAGE}\licenses\*"
+    SetOutPath "$INSTDIR"
     File /nonfatal "${STAGE}\Demo.lynx"
     File /nonfatal "${STAGE}\LYNX-bridge32.exe" ; 32-bit plugins run in it (round 176a)
     ; LYNX ASIO (REA round 97): LYNX loads it directly; the .bat files register it for other programs (administrator)
@@ -104,6 +116,7 @@ Section "!$(SecApp)" SecMain
     File /nonfatal "${STAGE}\Register LYNX ASIO.bat"
     File /nonfatal "${STAGE}\Unregister LYNX ASIO.bat"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
+    Call WriteInstalledFiles
 
     Delete "$SMPROGRAMS\LYNX.lnk" ; the shortcut before the v0.1.20 rename
     CreateShortCut "$SMPROGRAMS\LYNX SHARE.lnk" "$INSTDIR\LYNX.exe" "" "$INSTDIR\LYNX.exe" 0
@@ -160,6 +173,7 @@ Section "Uninstall"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\THIRD_PARTY.md"
     Delete "$INSTDIR\PRIVACY.md"
+    RMDir /r "$INSTDIR\licenses"
     Delete "$INSTDIR\Demo.lynx"
     ; LYNX ASIO registered for other programs: unregister it first (Windows asks for administrator rights).
     ; The 64-bit registration lives in the 64-bit registry view (this uninstaller is a 32-bit program).
@@ -182,6 +196,7 @@ Section "Uninstall"
     Delete "$INSTDIR\lynx-asio32.dll"
     Delete "$INSTDIR\Register LYNX ASIO.bat"
     Delete "$INSTDIR\Unregister LYNX ASIO.bat"
+    Delete "$INSTDIR\installed-files.txt"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
     Delete "$SMPROGRAMS\LYNX.lnk"

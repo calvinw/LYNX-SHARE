@@ -1,5 +1,105 @@
 [
   {
+    "version": "0.1.31.2-alpha",
+    "tag": "v0.1.31.2-alpha",
+    "date": "2026-11-25",
+    "url": "https://github.com/Ka1-S/LYNX-SHARE/releases/tag/v0.1.31.2-alpha",
+    "title": "More fixes for 0.1.31",
+    "summary": "LYNX SHARE 0.1.31.2 fixes a likely cause of a start page crash, the \"LYNX first\" keyboard setting over docked VST3 plugins, stretched clips that looped their first bar, automation lanes made from FL projects, exported .flp files that FL refused, presets of FL's stock synths in the Browser and a few smaller issues.",
+    "new": [],
+    "better": [],
+    "fixed": [
+      "Scrolling the start page's \"Start a new project\" list could read past the end of its list, the likely cause of a crash reported on Windows; it no longer does.",
+      "With a plugin window's keyboard button on \"LYNX first\" (\"Allow the plugin to handle keystrokes before the host does\" off), the typing keyboard now takes its keys before a docked VST3 plugin.",
+      "With \"Stretched pattern clips loop their pattern\" on, notes drawn, pasted or moved past a clip's first bar are heard: the pattern grows to hold them.",
+      "Playlist › \"Move automation clips into their tracks' lanes\" keeps the values the clips played, also on big FL projects.",
+      "\"Manage shortcuts\" should now open with the caret in its search box on desktops that activate new windows late (#244; tested by simulation only); Options › Typing keyboard settings opens the Root note / Octave / Layout menu on any window size (#270).",
+      "Export to FL Studio leaves out a project data folder that isn't on this computer (FL 2026 stopped at \"Invalid project data folder\"); an FL preset of a stock synth clicked in the Browser opens that synth with the preset (#288); MIDI files dropped on the Playlist become pattern clips by default (#287)."
+    ],
+    "known": []
+  },
+  {
+    "version": "0.1.31.1-alpha",
+    "tag": "v0.1.31.1-alpha",
+    "date": "2026-11-24",
+    "url": "https://github.com/Ka1-S/LYNX-SHARE/releases/tag/v0.1.31.1-alpha",
+    "title": "Fixes for 0.1.31",
+    "summary": "LYNX SHARE 0.1.31.1 fixes what you reported on 0.1.31: automation of FL projects on the controls, plugin windows that stopped opening, the Device view, Export with a folder in the file name, clips on instrument tracks, a crash in the hint bar and start-up memory.",
+    "new": [],
+    "better": [],
+    "fixed": [
+      "FL automation clips that drive several controls, or one through a formula, move every control they drive in the Mixer, the plugin windows and the Device view; a control moved by hand shows the value you hear (#253).",
+      "Docked plugin and channel windows open where they were again instead of drifting out of the main window after a few clicks.",
+      "Clip-launch layout: choosing a track in the Arrangement shows its devices, and the Device view's knobs follow automation.",
+      "Export audio with a folder in the file name writes there without asking again (#215); Automatic colors and icons take more than one rule (#239); right-clicking the hint bar no longer crashes LYNX (#269).",
+      "Track-only mode and the Simple layout: a double-click on an empty clip of an instrument track opens its notes.",
+      "0.1.31 used ~7 MB more memory and more CPU right after start-up."
+    ],
+    "known": [
+      "LYNX ASIO problems reported on 0.1.31 could not be reproduced yet; details help (Help › Report a problem...)."
+    ]
+  },
+  {
+    "version": "0.1.31-alpha",
+    "tag": "v0.1.31-alpha",
+    "date": "2026-11-23",
+    "url": "https://github.com/Ka1-S/LYNX-SHARE/releases/tag/v0.1.31-alpha",
+    "title": "A built-in Tracker, LYNX Model, JSFX, Linux arm64, two projects side by side and much more",
+    "summary": "LYNX SHARE 0.1.31 adds a built-in Tracker with tracker module import, LYNX Model (physical models of mallet instruments), JSFX scripts, Linux arm64 builds, a welcome card and a start page, Search actions for every command, two projects side by side with copy and paste between them, a Sections lane, a Chord lane with Smart Tempo, Track versions, automation write modes, Capture automation and modulators for any knob, FL Studio Mobile .flm export, Live's rack devices inline with a Macro Map and Solo / Cue, ARA on a mixer insert, a plugin pack of 39 plugins (also LV2 on Linux, and a 20 MB .7z on Windows) and fixes for around 30 GitHub issues.",
+    "new": [
+      "**Tracker**: View › Tracker (Shift+F7) shows a pattern's notes as rows and channels and edits them the tracker way, and tracker modules (.mod, .xm, .s3m, .it) open with their samples, patterns and tempo.",
+      "**LYNX Model**: a physical-model instrument with marimba, vibraphone, xylophone, glockenspiel, tubular bells and kalimba.",
+      "**JSFX**: REAPER's effect and instrument scripts run in mixer slots and as instruments on every system, and 31 free scripts come with LYNX SHARE.",
+      "**Linux arm64**: AppImage and tar.gz builds for a Raspberry Pi 4 / 5 with a 64-bit OS and other arm64 machines.",
+      "**A welcome that fits you**: the first start asks where you are coming from and sets up the matching layout; later starts open on a start page with your recent projects. Search actions (? or Ctrl+Shift+Y) finds any command, and File › Open in new window opens a second project with copy and paste between the windows.",
+      "**Song structure**: a Sections lane for whole song parts, a Chord lane with Smart Tempo, Track versions, and tracks you can hide or deactivate.",
+      "**Automation and modulation**: write modes Touch, Latch and Write, Capture automation, and modulators (LFO, envelope follower, ADSR, steps, random, macro, keytrack, velocity) for any knob, also on third-party plugins.",
+      "**Clip-launch layout**: Live's rack devices inline in the Device View with a Macro Map mode, and Live's Solo / Cue. **Simple layout**: Duck under, Reverb and Echo sends, sections and time signature changes.",
+      "**Formats and plugins**: FL Studio Mobile .flm export, Zipped loop package and Collect all and save, tracks imported from another project, ARA on a mixer insert, and a plugin pack of 39 plugins, also as LV2 on Linux and as a 20 MB .7z on Windows."
+    ],
+    "better": [
+      "**Performance**, measured again against FL Studio 2026 on one Windows PC: Thief plays with 34.4 % of one core and Exoplanet with 44.2 %. Safe overloads lets go as soon as the song stops.",
+      "**FL parity**: eight more Kilohearts laws and the Nonlinear Filter (Kilohearts Essentials 5.88 → 6.85, Nonlinear Filter 4.62 → 9.43); FL's slide law, Sytrus, Ogun and SimSynth velocity, Harmor automation and multi-target automation clips; FL's automation clip rows in the Channel rack.",
+      "**From contributors**: a gear that hides the header of docked windows (PRs #248 and #256) and windows that take the size of the tab they show (PR #259) by FKHR26; Patcher cables into a Formula Controller (PR #257) by codewithamoako."
+    ],
+    "fixed": [
+      "Around 30 GitHub issues: #193, #206, #215, #218, #222, #225–#244, #246, #247 and #249–#254, among them #233 (start offline), #243 (ARA on a mixer insert), #251 (save with all media), #253 (FL's send automation) and #254 (horizontal mouse wheel)."
+    ],
+    "known": [
+      "JSFX scripts with their own @gfx display show LYNX SHARE's slider panel instead. Linux arm64 has no plugin pack yet. #199, #255 and #258 were not reproduced; 0.1.31 adds checks for them."
+    ]
+  },
+  {
+    "version": "0.1.30-alpha",
+    "tag": "v0.1.30-alpha",
+    "date": "2026-11-20",
+    "url": "https://github.com/Ka1-S/LYNX-SHARE/releases/tag/v0.1.30-alpha",
+    "title": "About half of FL Studio's CPU while a song plays; ARA, a polyphonic note editor, DAWproject and much more",
+    "summary": "On one Windows PC, FL's Thief demo plays with 27.5 % of one CPU core in LYNX SHARE (FL Studio 2026: 59.5 %; 0.1.29: 77.8 %), with the same sound. The release adds ARA 2 hosting for Melodyne and other ARA plugins, a polyphonic note editor, polyphonic audio to MIDI, a more natural Newtone, the Helix wavetable synth with Helix+, a Chord helper, a BandLab-style Drum Machine, MPE, hardware MIDI Out, a DirectWave editor, DAWproject, GarageBand and BandLab projects, .gig / .dwp / .ncw instruments, AIFF and M4A export, more than 40 refitted plugin stand-ins and fixes for around 40 GitHub issues.",
+    "new": [
+      "**Lighter than FL Studio while a song plays** (one Windows PC, quiet machine, % of one core): Thief 27.5 % (FL Studio 2026: 59.5 %), Exoplanet 45.9 % (FL Studio: 59.5 %), an empty project 11.1 % (FL Studio: 22.5 %). The engine changes keep the output bit for bit.",
+      "**ARA 2 hosting**: an audio clip's menu › LYNX extras › Edit in ARA plugin opens Melodyne or another ARA 2 plugin on the clip, on LYNX SHARE's timeline. The edits are saved in the project and rendered in exports.",
+      "**Polyphonic editing**: Edit notes (polyphonic) moves and retunes single notes inside chords and mixes, and Convert to MIDI (polyphonic) turns them into notes.",
+      "**Newtone's natural engine**: new Newtone slots keep the voice's vowels, consonants and level, with Pitch modulation and Pitch drift per note.",
+      "**New instruments**: Helix, a wavetable synth with a Helix+ section (more warps, 16-voice unison, macros, drawn LFOs, an effects rack), and Tetra, a 4-operator FM synth that Live's Operator opens on.",
+      "**Chord helper** in the Piano roll, the Simple workflow's editor and the Clip View, and FL's chord strip in the Piano roll.",
+      "**Simple workflow**: a BandLab-style Drum Machine, a tuner, a song fade-out, a Controls tab, a Loop Browser, and loops that fit the song's key and tempo.",
+      "**Clip-launch workflow**: Live's return tracks, Sends, crossfader and scene follow actions, and Live's look for the Session mixer and its views.",
+      "**New formats**: DAWproject (open and export), GarageBand .band, BandLab .blx, DirectWave .dwp / .dwb, .gig instruments and Kontakt .ncw samples; AIFF and M4A export."
+    ],
+    "better": [
+      "**Plugin stand-ins**: more than 40 refitted against the plugins they replace (FabFilter Pro-C 3 6.30 → 8.60, Waves L2 3.44 → 9.52, Timeless 3 2.37 → 6.93, Eiosis AirEQ 5.78 → 8.85 and more). Projects saved earlier keep their sound.",
+      "**FL Studio workflow**: a DirectWave editor, Slicex snapping, FL's Browser tabs and favourites, a docked Browser, fade handles on audio clips, the graph editor's Note pitch / Shift / Repeat lanes, MPE and hardware MIDI Out.",
+      "**Plugin hosting**: plugins can run in groups of processes, more CLAP extensions, and sample-accurate automation for CLAP and VST3."
+    ],
+    "fixed": [
+      "Around 40 GitHub issues, among them #138 (silent start of exports), #185 (Delay under tempo automation), #188 (minimized window on Linux), #189 (small text on Linux, now with a Text size setting), #204 (audio-clip channels) and #209 (plugin picker freeze)."
+    ],
+    "known": [
+      "ARA was tested with Melodyne 5 on Windows only. The BandLab reader was tested on made-up projects only. Reverb stand-ins are still well below the dynamics and EQ ones."
+    ]
+  },
+  {
     "version": "0.1.29-alpha",
     "tag": "v0.1.29-alpha",
     "date": "2026-11-15",

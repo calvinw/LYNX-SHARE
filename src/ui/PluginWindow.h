@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include <memory>
 #include <vector>
 
@@ -39,6 +41,8 @@ void open (std::shared_ptr<void> owner, juce::AudioPluginInstance& plugin, const
 void setDockWorkspace (Workspace* workspace);
 // FL's plugin menu › Detached for an open editor: it closes and opens again in the other host (saved in the project).
 void setDetached (juce::AudioPluginInstance& plugin, bool detached);
+// Round 190in (shots): FL's ▸ wrapper menu of the plugin's open window (nullopt: no window open).
+std::optional<juce::PopupMenu> wrapperMenuForSnapshot (juce::AudioPluginInstance& plugin);
 // FL's Tools › Macros › "Switch all plugin editors to" › Attached / Detached (round 190i): every hosted plugin of the
 // song, and the open editors move to the other host.
 void setAllDetached (AudioEngine& engine, bool detached);
@@ -110,6 +114,9 @@ bool saveSettingsPageShot (juce::Component& window, const juce::File& png);
 // Tests / shots (round 190ao): runs the open window's periodic check now (the crash notice follows the plugin) and
 // writes a PNG of its content: the editor page (or the crash notice in its place), or the Wrapper settings page.
 bool saveWindowShot (const juce::AudioPluginInstance& plugin, const juce::File& png, bool settingsPage);
+// Round 190pw (PR #259, tests): the open window shows the plugin's editor (`page` 0) or the Wrapper settings (1), as its
+// tabs do (-1: as it is); returns the window's bounds and its content's size (nullopt: no window)
+std::optional<std::pair<juce::Rectangle<int>, juce::Rectangle<int>>> showWindowPage (const juce::AudioPluginInstance& plugin, int page);
 // Opens the open window's preset menu (FL's plugin menu), as a click on the preset name does.
 bool showPresetMenu (const juce::AudioPluginInstance& plugin);
 } // namespace PluginWindows

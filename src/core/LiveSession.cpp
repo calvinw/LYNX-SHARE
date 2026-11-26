@@ -48,9 +48,9 @@ bool isCode (int v) noexcept { return v >= (1 << codeShift); }
 bool noteLess (const Note& a, const Note& b)
 {
     return std::tie (a.channel, a.start, a.key, a.length, a.velocity, a.pan, a.finePitch, a.muted, a.slide, a.porta, a.release, a.modX, a.modY,
-                     a.colour, a.group, a.chance, a.velocityRange, a.chanceGroup, a.chanceOne)
+                     a.colour, a.group, a.chance, a.velocityRange, a.chanceGroup, a.chanceOne, a.repeat)
            < std::tie (b.channel, b.start, b.key, b.length, b.velocity, b.pan, b.finePitch, b.muted, b.slide, b.porta, b.release, b.modX, b.modY,
-                       b.colour, b.group, b.chance, b.velocityRange, b.chanceGroup, b.chanceOne);
+                       b.colour, b.group, b.chance, b.velocityRange, b.chanceGroup, b.chanceOne, b.repeat);
 }
 
 struct U
@@ -245,9 +245,9 @@ bool sameGlobals (const Song& a, const Song& b)
 {
     return a.bpm == b.bpm && a.beatsPerBar == b.beatsPerBar && a.beatUnit == b.beatUnit && a.swing == b.swing && a.channelGroups == b.channelGroups && a.masterPitch == b.masterPitch
            && a.info == b.info && a.projectId == b.projectId && a.performanceMode == b.performanceMode && a.substitutesBypassed == b.substitutesBypassed
-           && a.cleanMixer == b.cleanMixer && a.autoCrossfades == b.autoCrossfades && a.linkTracksToMixer == b.linkTracksToMixer && a.compCrossfadeMs == b.compCrossfadeMs && a.playTruncatedNotes == b.playTruncatedNotes && a.muteRunsEffects == b.muteRunsEffects && a.patternClipTakeover == b.patternClipTakeover && a.mutedInsertsSkip == b.mutedInsertsSkip
+           && a.cleanMixer == b.cleanMixer && a.autoCrossfades == b.autoCrossfades && a.linkTracksToMixer == b.linkTracksToMixer && a.compCrossfadeMs == b.compCrossfadeMs && a.playTruncatedNotes == b.playTruncatedNotes && a.muteRunsEffects == b.muteRunsEffects && a.slideNoteProps == b.slideNoteProps && a.exportMarkers == b.exportMarkers && a.patternClipTakeover == b.patternClipTakeover && a.mutedInsertsSkip == b.mutedInsertsSkip
            && a.fastDeclick == b.fastDeclick && a.panTriangular == b.panTriangular && a.flPluginLevels == b.flPluginLevels && a.autoPdc == b.autoPdc
-           && a.compensateAutomations == b.compensateAutomations && a.timeSignatureMode == b.timeSignatureMode && a.scaleHighlight == b.scaleHighlight
+           && a.compensateAutomations == b.compensateAutomations && a.compensateMixerLevels == b.compensateMixerLevels && a.timeSignatureMode == b.timeSignatureMode && a.scaleHighlight == b.scaleHighlight
            && a.dataFolder == b.dataFolder && a.patternBlocksOn == b.patternBlocksOn;
 }
 
@@ -271,6 +271,7 @@ void copyGlobals (const Song& from, Song& to)
     to.compCrossfadeMs = from.compCrossfadeMs;
     to.playTruncatedNotes = from.playTruncatedNotes;
     to.muteRunsEffects = from.muteRunsEffects;
+    to.slideNoteProps = from.slideNoteProps;
     to.patternClipTakeover = from.patternClipTakeover;
     to.mutedInsertsSkip = from.mutedInsertsSkip;
     to.fastDeclick = from.fastDeclick;
@@ -278,6 +279,7 @@ void copyGlobals (const Song& from, Song& to)
     to.flPluginLevels = from.flPluginLevels;
     to.autoPdc = from.autoPdc;
     to.compensateAutomations = from.compensateAutomations;
+    to.compensateMixerLevels = from.compensateMixerLevels;
     to.timeSignatureMode = from.timeSignatureMode;
     to.scaleHighlight = from.scaleHighlight;
     to.dataFolder = from.dataFolder;

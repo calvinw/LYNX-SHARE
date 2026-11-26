@@ -4,6 +4,7 @@
 #include "core/TestProfile.h"
 #include "platform/Package.h"
 
+#include <algorithm>
 #include <iterator>
 #include <string>
 
@@ -12,6 +13,13 @@
   #define NOMINMAX
  #endif
  #include <windows.h>
+#else
+ #include <cstdlib>
+ #include <sys/resource.h>
+ #include <sys/stat.h>
+#endif
+#if JUCE_LINUX
+ #include <fcntl.h>
 #endif
 
 namespace lynx::platform
@@ -229,4 +237,67 @@ bool relaunchFromAsciiPath (int& exitCode)
     return false;
    #endif
 }
+
+juce::File useOwnTempFolder (const juce::String& prefix)
+{
+   #if JUCE_MAC
+    (void) prefix; // (JUCE's temp folder there is ~/Library/Caches/<app>, not TMPDIR: it stays as it is)
+    return {};
+   #else
+    const auto base = juce::File::getSpecialLocation (juce::File::tempDirectory);
+    const auto own = base.getChildFile (prefix + "-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64())
+                                        + juce::String::toHexString ((juce::int64) juce::Time::currentTimeMillis()));
+    if (! own.createDirectory())
+        return {};
+    const auto path = own.getFullPathName();
+   #if JUCE_WINDOWS
+    // (the process environment, which GetTempPath reads and child processes inherit)
+    if (! SetEnvironmentVariableW (L"TMP", path.toWideCharPointer()) || ! SetEnvironmentVariableW (L"TEMP", path.toWideCharPointer()))
+   #else
+    if (setenv ("TMPDIR", path.toRawUTF8(), 1) != 0)
+   #endif
+    {
+        own.deleteRecursively();
+        return {};
+    }
+    return own;
+   #endif
+}
+
+void allowMainThreadStack (std::size_t bytes)
+{
+   #if JUCE_LINUX || JUCE_BSD
+    rlimit limit {};
+    if (getrlimit (RLIMIT_STACK, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY || limit.rlim_cur >= (rlim_t) bytes)
+        return;
+    limit.rlim_cur = limit.rlim_max == RLIM_INFINITY ? (rlim_t) bytes : std::min (limit.rlim_max, (rlim_t) bytes);
+    setrlimit (RLIMIT_STACK, &limit);
+   #else
+    (void) bytes;
+   #endif
+}
+double fileBirthSeconds (const juce::File& file)
+{
+    if (! file.exists())
+        return 0.0;
+   #if JUCE_WINDOWS
+    const auto t = file.getCreationTime().toMilliseconds();
+    return t > 0 ? (double) t / 1000.0 : 0.0;
+   #elif JUCE_MAC
+    struct stat info {};
+    if (stat (file.getFullPathName().toRawUTF8(), &info) != 0 || info.st_birthtimespec.tv_sec <= 0)
+        return 0.0;
+    return (double) info.st_birthtimespec.tv_sec + (double) info.st_birthtimespec.tv_nsec / 1.0e9;
+   #elif JUCE_LINUX && defined (STATX_BTIME)
+    // (glibc 2.28+; LYNX needs 2.35)
+    struct statx info {};
+    if (statx (AT_FDCWD, file.getFullPathName().toRawUTF8(), 0, STATX_BTIME, &info) != 0
+        || (info.stx_mask & STATX_BTIME) == 0 || info.stx_btime.tv_sec <= 0)
+        return 0.0;
+    return (double) info.stx_btime.tv_sec + (double) info.stx_btime.tv_nsec / 1.0e9;
+   #else
+    return 0.0;
+   #endif
+}
+
 } // namespace lynx::platform

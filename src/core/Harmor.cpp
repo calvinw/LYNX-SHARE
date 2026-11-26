@@ -1,4 +1,5 @@
 #include "core/Harmor.h"
+#include "core/HarmorResynth.h"
 #include "core/HostSlide.h"
 #include "core/HarmlessFx.h"
 #include "core/Song.h"
@@ -212,6 +213,9 @@ struct StateData
     std::array<std::int32_t, 6> order { 0, 1, 2, 3, 4, 5 }; // effects-rack unit order
     std::array<std::uint8_t, 0x3d> gmisc {};
     std::size_t globalOffset = 0;
+    // LYNX's engine revision for this channel (ChannelDef::engineRev): 0 = a project saved before round natives190kj
+    // (resynthesis-mode images ignored, as LYNX played them then), 1 = resynthesis played (FL's)
+    int engineRev = 1;
 
     std::int32_t GI (int o) const noexcept { std::int32_t v; std::memcpy (&v, gmisc.data() + o, 4); return v; }
 };
@@ -2072,6 +2076,8 @@ struct Filt
 struct ImageData
 {
     bool usable = false;
+    bool resynth = false;       // resynthesis mode (object mode 1): the planes come from the analysis of `path`
+    std::string path;           // the sample's path as saved (FL's path variables included)
     std::string why;            // why an image tail is not used (fallback report)
     int cols = 0, rows = 0, stride = 0, loopMode = 0;
     float f100 = 0.0f;
@@ -2098,7 +2104,23 @@ ImageData parseImage (const std::vector<std::uint8_t>& t)
     im.cols = r.i32(), im.rows = r.i32();
     if (mode != 0)
     {
+        // resynthesis: no planes stored, the sample is analysed at load (FUN_00794510); its path follows the 0x2c
+        // header (FUN_0077d050: one length byte, 0xff → a 32-bit length, then the bytes; trailing control characters
+        // trimmed)
         im.why = "resynthesis-mode image (not modelled: the part plays its timbres)";
+        if (r.ok && t.size() > 48)
+        {
+            std::size_t o = 48, len = t[o++];
+            if (len == 0xff && o + 4 <= t.size())
+                len = (std::size_t) t[o] | ((std::size_t) t[o + 1] << 8) | ((std::size_t) t[o + 2] << 16) | ((std::size_t) t[o + 3] << 24), o += 4;
+            if (o + len <= t.size())
+            {
+                im.path.assign ((const char*) t.data() + o, len);
+                while (! im.path.empty() && (unsigned char) im.path.back() < 0x20)
+                    im.path.pop_back();
+            }
+        }
+        im.resynth = true;
         return im;
     }
     if (r.ok && (im.cols == 0 || im.rows == 0))
@@ -2177,6 +2199,12 @@ struct Image
 {
     int cols = 0, rows = 0, stride = 0, lm = 0, k5c = 0, k90 = 0, k94 = 0;
     std::vector<float> gain, freq;
+    // resynthesis (object mode 1, part +0x5c = 2; round natives190kj): the analysed sample's planes
+    bool resynth = false;
+    std::vector<float> phase, adv;          // plane 2 (code + phase) and +0x168 (advance per column)
+    double msCol = 100.0;                   // +0x130: milliseconds per column (100 for an image)
+    double k148 = 0.0;                      // +0x148: pitch of harmonic 1 against C5, cents
+    double s80 = std::numeric_limits<double>::max(); // +0x80: the loop start before the crossfade shortened it
     bool hasGain = false, hasFreq = false;
     double s60 = 0.0, s68 = 0.0, s70 = 0.0, s88 = 0.0, s78 = std::numeric_limits<double>::max();
     float a0 = 0.0f;
@@ -2371,6 +2399,7 @@ struct Image
                     // loop crossfade (+0xf8): the loop shortened by the fade, a second read one loop length back faded
                     // in over [+0x78, +0x68)
                     a70 = std::max (a70 * (1.0 - f8), 5.960464477539063e-08);
+                    s80 = a60;
                     s78 = a60 + a70;
                     a0 = (float) (1.0 / (a68 - s78));
                     a60 = a68 - a70;
@@ -2608,8 +2637,11 @@ struct ImagePos
 {
     double acc = 0.0, pos = 0.0, off = 0.0;
     bool ended = false;
+    // resynthesis (voice +0x160 previous position, the speed dVar42 of FUN_0088ab10, +0x170 the transient offset)
+    double prevD = 0.0, vel = 1.0;
+    float scrub = 0.0f;
 
-    void step (const Image& im, double A27, double A28) noexcept
+    void step (const Image& im, double A27, double A28, bool first = false, float k15c = 1.0f, float k10e0 = 0.0f) noexcept
     {
         auto diff = (float) (off - im.toff);
         if (diff != 0.0f)
@@ -2629,8 +2661,15 @@ struct ImagePos
                 }
             }
         }
-        const auto d = (off + A27 * 2.0) * (double) im.cols + acc;
+        auto d = (off + A27 * 2.0) * (double) im.cols + acc;
+        if (im.resynth)
+        {
+            vel = first ? 1.0 : (d - prevD) * (double) k15c;
+            prevD = d;
+        }
         ended = im.lm == 0 && im.s68 <= d;
+        if (im.resynth)
+            d = d + (double) scrub;
         double p = d;
         if (im.lm == 0)
             p = d < 0.0 ? 0.0 : std::min (d, (double) im.cols);
@@ -2681,6 +2720,18 @@ struct ImagePos
         }
         pos = p;
         acc = acc + im.speed * A28;
+        if (im.resynth && scrub != 0.0f)
+        {
+            // the transient offset decays by the speed (clamped to 10⁻⁴…4) × plugin +0x10e0 per block
+            const auto av = (float) std::fabs (vel);
+            auto f = 9.999999747378752e-05f;
+            if (f <= av)
+                f = av <= 4.0f ? av : 4.0f;
+            f = f * k10e0;
+            if (std::fabs (scrub) <= f)
+                f = std::fabs (scrub);
+            scrub = scrub - (scrub > 0.0f ? 1.0f : -1.0f) * f;
+        }
     }
 };
 
@@ -2747,6 +2798,11 @@ struct Part
     float delaySmp = 0.0f;               // part +0x1a0: note start delay in samples (part parameter 2)
     std::vector<float> fadeIn;           // part +0x660 segment 0: the record's attack fade (part misc +4), empty = off
     std::shared_ptr<const Image> img;    // image synthesis (null: no usable image)
+    // resynthesis step (part +0x164 blocks, +0x168 samples, +0x190 = 1/+0x168), sharpening (+0x158, sign +0x170),
+    // column speed reference (+0x15c) and the plugin's scrub-offset decay (+0x10e0)
+    int rs164 = 1, rs168 = 1, rs170 = 0;
+    double rs190 = 1.0;
+    float sharp = 0.0f, rs15c = 1.0f, rs10e0 = 0.0f;
     std::vector<std::string> fallbacks;
 
     // FUN_00888ed0: curve sampled per partial position (index 4+i at log2(i+1)·length/9), [1] = [4], [2]/[3] at the
@@ -3201,31 +3257,78 @@ struct Part
         if (blend > 5)
             fallbacks.push_back ("timbre blend mode " + std::to_string (blend) + " (played as mode 0)");
         if (pd.tail >= 4 + 0x2c) // (any image object: Labyrinth's 16 × 12 one is 829 bytes)
-            buildImage (pd);
+            buildImage (pd, S.engineRev);
+        if (img != nullptr && img->resynth)
+        {
+            // FUN_00873c60 with part +0x5c = 2: the part's pitch is harmonic 1 of the analysis (C2) instead of an octave
+            // below the note; the resynthesis step (part +0x164 blocks of +0x168 samples, FUN_00879540 / 0x878e18)
+            const auto p41 = p[41] != 0 ? p[41] : 1;
+            const auto pr = p[40] > 0 ? p[40] / (p41 * 10000.0) : 1.0;
+            part30 = std::log (pr) * 1.4426950408889634 * 1200.0 + img->k148;
+            pitch = f32 (mainpitch + part30);
+            rs164 = (int) std::max (1LL, rndi (176.0 / (double) B));
+            rs168 = B * rs164;
+            rs190 = 1.0 / (double) rs168;
+            {
+                const auto a = std::fabs ((float) p[86] * 0.001f);
+                sharp = a * a; // part +0x158 (param 86 = image sharpening)
+                rs170 = p[86] == 0 ? 0 : (p[86] < 0 ? -1 : 1);
+            }
+            rs15c = (float) (1.0 / (B / (img->msCol * 0.001 * fs))); // part +0x15c
+            rs10e0 = (float) (B * 0.0005); // plugin +0x10e0 (0.044 at 44.1 kHz [EXEC]; B/2000 inferred)
+        }
     }
 
     // the image object (imgm.Image): planes, loop points, normalisation, gain/frequency scales, masks, pitch track
-    void buildImage (const PartData& pd)
+    void buildImage (const PartData& pd, int engineRev)
     {
         const auto d = parseImage (pd.tailBytes);
-        if (! d.usable)
+        std::shared_ptr<const harmor::ResynthPlanes> rs;
+        if (d.resynth && engineRev >= 1)
+        {
+            harmor::ResynthOptions o;
+            o.mode = pd.I (0x20) == 1 ? 1 : 0; // part misc +0x20 → part +0x240 (FUN_00794260)
+            o.soft = pd.I (0x24);              // part misc +0x24 → part +0x244 (FUN_00895ea0)
+            rs = harmor::resynthesisFor (d.path, o);
+            if (rs == nullptr)
+            {
+                fallbacks.push_back ("resynthesis sample not found or unreadable (" + d.path + "): the part plays its timbres");
+                return;
+            }
+        }
+        else if (! d.usable)
         {
             if (! d.why.empty())
                 fallbacks.push_back (d.why);
             return;
         }
         auto im = std::make_shared<Image>();
-        im->cols = d.cols, im->rows = d.rows, im->stride = d.stride;
-        im->gain = d.gain, im->freq = d.freq;
-        im->hasGain = ! d.gain.empty(), im->hasFreq = ! d.freq.empty();
+        if (rs != nullptr)
+        {
+            // resynthesis (round natives190kj): the planes of the analysed sample (the pitch track reads the
+            // frequency plane before its normalisation, as FUN_00795720 does)
+            im->resynth = true;
+            im->cols = rs->cols, im->rows = rs->rows, im->stride = rs->stride;
+            im->gain = rs->gain, im->freq = rs->freqRaw, im->phase = rs->phase, im->adv = rs->adv;
+            im->msCol = rs->msCol, im->k148 = rs->k148;
+            im->hasGain = im->hasFreq = true;
+        }
+        else
+        {
+            im->cols = d.cols, im->rows = d.rows, im->stride = d.stride;
+            im->gain = d.gain, im->freq = d.freq;
+            im->hasGain = ! d.gain.empty(), im->hasFreq = ! d.freq.empty();
+        }
         std::string why;
         if (! im->loopSetup (d, why))
         {
             fallbacks.push_back (why);
             return;
         }
+        if (rs != nullptr)
+            im->k38 = rs->k38; // FUN_00794510 → FUN_00798d30 (the weighted magnitude maximum)
         // normalisation (FUN_00795720): 1 / sqrt(max over columns of Σ (amp_i/(i + 1))²), at least 2^-12
-        if (im->hasGain)
+        else if (im->hasGain)
         {
             std::vector<float> a ((std::size_t) im->stride);
             std::vector<double> a2 ((std::size_t) im->rows);
@@ -3263,7 +3366,7 @@ struct Part
                 im->smThr = (float) ((d16 * 250.0) / std::max ((double) im->cols, 5.960464477539063e-08));
         }
         // speed: columns per control block (+0x138 = B / (100 ms · fs) at fine speed 1)
-        im->speed = p[84] * 0.0001 * std::exp (p[85] * 0.0001 * ln2) * (B / (100.0 * 0.001 * fs));
+        im->speed = p[84] * 0.0001 * std::exp (p[85] * 0.0001 * ln2) * (B / (im->msCol * 0.001 * fs));
         im->interpGain = p[87], im->interpFreq = p[91], im->fmode = p[90];
         im->gmix = (float) p[89] * 0.001f;
         im->fmix = (float) p[94] * 0.001f;
@@ -3275,7 +3378,7 @@ struct Part
                 sc = (double) std::max (0.0f, (float) ((sc + 2.0) * 32.0));
             else if (im->fmode == 3)
                 sc = (sc + 2.0) * 0.125;
-            im->k174 = (float) sc;
+            im->k174 = (float) (sc * (double) (rs != nullptr ? rs->k104 : 1.0f)); // × object +0x104
         }
         const auto& shp = pd.shp;
         {
@@ -3318,6 +3421,8 @@ struct Part
         }
         if (im->hasFreq && im->hasGain && im->rows >= 16)
             im->pitchTrack();
+        if (rs != nullptr)
+            im->freq = rs->freq; // plane 1 normalised by +0x104 (after the pitch track, FUN_00795720)
         img = std::move (im);
     }
 
@@ -3577,6 +3682,26 @@ struct Patch
     std::vector<std::string> fallbacks;
     std::shared_ptr<harmor::FxHook> rack; // the effects rack (this patch's own instance), null when every unit is off
 };
+
+// Round 190pr: FL's automation of the parameters harmor::automatable lists, as FL's ProcessParam stores them [DECOMP
+// FUN_00879540]: Mod X / Y / Z = raw / 512 (the voices glide to it through their own X / Y / Z smoothing), a filter's
+// frequency knob = lo + raw / 8192 · span in double (each voice's knob follows it with its own smoothing). In place: the
+// patch belongs to the one instance (or reference render) that built it (audio thread).
+void applyFlParam (Patch& P, int k, int raw) noexcept
+{
+    if (k >= 772 && k <= 774)
+    {
+        const auto v = (double) (float) ((double) raw * 0.001953125);
+        for (auto& part : P.parts)
+            (k == 772 ? part.modx : k == 773 ? part.mody : part.modz) = v;
+        return;
+    }
+    if (k < 0 || k >= 772 || (k % 386 != 52 && k % 386 != 64))
+        return;
+    const auto part = k / 386, f = k % 386 == 52 ? 0 : 1;
+    auto& fl = P.parts[(std::size_t) part].filt[(std::size_t) f];
+    fl.knob = (float) ((double) fl.lo + (double) raw * 0.0001220703125 * (double) fl.span);
+}
 
 // Harmor's effects rack (REA_rodada38) through the engine's FxHook slot
 class RackHook final : public harmor::FxHook
@@ -3898,6 +4023,10 @@ struct Record
     double nzPos = 0.0, nzLen = 0.0, nzRate = 0.0;
     ImagePos ipos;            // image time position
     bool imgEnd = false;      // a one-shot image ran out (record state 9)
+    // resynthesis: blocks to the next step (voice +0x180), the frequencies of the last step over f0 (+0x178, count
+    // +0x184)
+    int c180 = 0, n184 = -1;
+    std::array<double, bankSize> rsSaved {};
     double v1b0 = 0.0;        // voice +0x1b0: pitch in cents incl. the unison detune (formant reference)
     float agref = 1.6428422f; // auto-gain reference energy
     HostSlide slide;          // a slide note moving the voice's pitch (issue #14)
@@ -3908,6 +4037,7 @@ struct NoteRec
     bool used = false, held = false, pressed = false, inHeads = false, inHeld = false;
     int key = 60, group = 0, nv = 0;
     double vel = 1, fv = 1, fp = 0, fpitch = 0, notePan = 0;
+    double initVol = 1; // FL's Init.Vol of the note (round 190pr: Final.Vol = Init.Vol × channel volume; 1 before)
     float liveRef = NAN; // the channel pitch it started with (round 167a: its records follow the live knob)
     long long st = 0, seq = 0;
     std::uint32_t lynxNote = 0; // the LYNX note id that started it (round 190ej)
@@ -4017,7 +4147,7 @@ public:
 
     // ---- notes (hmodel.render's note-on / note-off handling) ----
 
-    int noteOn (int key, double vel, double fv, double fp, double fpitch, double notePan = 0.0) noexcept
+    int noteOn (int key, double vel, double fv, double fp, double fpitch, double notePan = 0.0, double initVol = 1.0) noexcept
     {
         if (P == nullptr)
             return -1;
@@ -4026,7 +4156,7 @@ public:
             return -1;
         auto& nt = notes[(std::size_t) slot];
         nt.used = true, nt.pressed = true, nt.held = false, nt.inHeads = false, nt.inHeld = false;
-        nt.key = key, nt.vel = vel, nt.fv = fv, nt.fp = fp, nt.fpitch = fpitch, nt.notePan = notePan;
+        nt.key = key, nt.vel = vel, nt.fv = fv, nt.fp = fp, nt.fpitch = fpitch, nt.notePan = notePan, nt.initVol = initVol;
         nt.liveRef = nextLiveRef;
         nt.st = now, nt.seq = noteSeq++, nt.nv = 0, nt.group = 0;
         arpDirty = true;
@@ -4212,13 +4342,31 @@ public:
     }
 
     // FL's channel level changes reach the sounding notes through FinalLevels (chan.Vol, chan.Pan)
+    // FL's slide notes move a sounding note's Init.Vol (issue #236, round 190pr): the pressed notes of `key` take the new
+    // one, their records the new Final.Vol (Init.Vol × the channel volume `vol`)
+    void setNoteInitVol (int key, double initVol, double vol) noexcept
+    {
+        for (int i = 0; i < maxNotes; ++i)
+        {
+            auto& nt = notes[(std::size_t) i];
+            if (nt.used && nt.pressed && nt.key == key)
+                nt.initVol = initVol, nt.fv = vol * initVol;
+        }
+        for (int i = 0; i < liveCount; ++i)
+        {
+            auto& r = records[(std::size_t) live[(std::size_t) i]];
+            if (r.note >= 0 && notes[(std::size_t) r.note].key == key && notes[(std::size_t) r.note].pressed)
+                r.fvol = notes[(std::size_t) r.note].fv;
+        }
+    }
+
     void setChannelLevels (double vol, double pan) noexcept
     {
         for (int i = 0; i < maxNotes; ++i)
         {
             auto& nt = notes[(std::size_t) i];
             if (nt.used)
-                nt.fv = vol, nt.fp = nt.notePan + pan;
+                nt.fv = vol * nt.initVol, nt.fp = nt.notePan + pan;
         }
         for (int i = 0; i < liveCount; ++i)
         {
@@ -4300,7 +4448,7 @@ public:
             if (v.slide.moving()) // a slide note moves the voice's pitch (issue #14)
             {
                 const auto was = v.slide.cents;
-                v.fpitch += (double) (v.slide.advance ((float) n) - was);
+                v.fpitch += (double) (v.slide.advanceFirst ((float) n) - was);
             }
             renderRecord (v, n);
         }
@@ -4396,6 +4544,10 @@ private:
     std::array<double, 8 * maxHostBlock> laneSums {};
     std::array<float, bankSize> tmpT {}, tmpT0 {}, tmpA {}, tmpB {};
     std::array<float, 4096 + 8> imgAmp {};        // image column (≤ stride entries)
+    std::array<float, 4096 + 8> rsAn {}, rsK {};  // resynthesis: analysed phases, per-partial correction amounts
+    std::array<int, 4096 + 8> rsCode {};
+    bool hzKeep = false;
+    std::array<double, 4096 + 8> rsPred {}, rsCorr {};
     std::array<float, 3 * (4096 + 8) + 8> imgTmp {}; // formant scratch (envelope, fine structure, output)
     std::array<double, bankSize + 600> convBuf {};
 
@@ -4612,6 +4764,7 @@ private:
         v.slide = {};
         v.slide.anchor (nt.liveRef);
         v.n = 0, v.firstblk = true;
+        v.c180 = 0, v.n184 = -1;
         v.a.fill (0.0f), v.T.fill (0.0f), v.kg.fill ((float) p.glide), v.ph.fill (0.0), v.f.fill (0.0);
         v.centsValid = false, v.prismValid = false, v.hbValid = false;
         v.vibph = 0.0, v.dtPrev = 0.0, v.phph = 0.0, v.phi70 = 0.0;
@@ -4846,7 +4999,7 @@ private:
         const Image* im = p.img.get();
         if (im != nullptr)
         {
-            v.ipos.step (*im, A[27], A[28]);
+            v.ipos.step (*im, A[27], A[28], v.firstblk, p.rs15c, p.rs10e0);
             // a one-shot image that ran out ends the record when the time-offset articulator (27, or 28 with the
             // filters in reverse order: part +0xb64) has no envelope (FUN_008856b0, record state 9 inside the block)
             if (v.ipos.ended && ! p.arts[(std::size_t) (27 + p.firstF)].hasEnv)
@@ -4858,6 +5011,10 @@ private:
         }
         const bool imf = im != nullptr && im->hasFreq;
         const bool imu = imf && im->fmode == 3;
+        const bool rsm = im != nullptr && im->resynth;
+        if (rsm)
+            --v.c180; // (voice +0x180, every block)
+        const bool rstep = rsm && v.c180 < 1;
 
         auto cents = (double) (((float) v.fpitch + (float) p.pitch) + v.gy[2]);
         if (p.vibDepth != 0.0)
@@ -4880,8 +5037,8 @@ private:
         }
         const bool hbChanged = hblurUpdate (v, p, A);
         bool changed = ! v.centsValid || cents != v.centsPrev || a4 != v.a4Prev || prismChanged || hbChanged;
-        if (imf)
-            changed = true; // image frequency plane: frequencies rebuilt every block (voice +0x7c forced)
+        if (imf && (! rsm || rstep))
+            changed = true; // image frequency plane: frequencies rebuilt every block (voice +0x7c forced); resynthesis: every step
         int n = v.n;
         if (changed)
         {
@@ -4904,7 +5061,10 @@ private:
                 q = f32 (q / fv);
             }
             long long cnt = (std::isfinite (q) ? std::min (std::max (rndi (q), -1000000LL), 1000000LL) : 1000000LL) + 1 + v.hbM;
-            cnt = std::max (cnt, 1LL) + 4;
+            cnt = std::max (cnt, 1LL);
+            if (rsm)
+                cnt = std::max (cnt, (long long) im->rows); // (FUN_0088fb80: every harmonic of the analysis)
+            cnt = cnt + 4;
             cnt = std::min (cnt, (long long) bankSize);
             const auto nb = (int) ((cnt + 7) & ~7LL);
             const auto oldn = v.n;
@@ -4914,6 +5074,15 @@ private:
                 v.pkPrev = std::numeric_limits<double>::quiet_NaN(), v.bpValid = false; // (+0x1cc = −1)
             }
             n = v.n;
+            if (rsm && ! rstep && n == v.n184)
+            {
+                // between two resynthesis steps the frequencies keep the last step's, moved by the pitch
+                const auto k = (double) (float) v.f0fs32;
+                for (int i = 0; i < n; ++i)
+                    v.f[(std::size_t) i] = v.rsSaved[(std::size_t) i] * k;
+                v.hzdirty = true;
+                goto rebuilt;
+            }
             for (int i = 0; i < n; ++i)
                 v.f[(std::size_t) i] = p.ratio[(std::size_t) i] * f0fs;
             if (p.pmode == 0)
@@ -4991,10 +5160,14 @@ private:
             }
             else if (n > oldn)
                 v.pendOldn = oldn; // entering partials get their phase offset at the end of the block
-            if (imf)
+            if (imf && (! rsm || rstep))
                 imageFreq (v, p, *im, A, a4);
-            v.hzdirty = true;
+            hzKeep = false;
+            if (rstep)
+                resynthStep (v, p, *im);
+            v.hzdirty = ! hzKeep;
         }
+    rebuilt:
         // timbre mix + sub gains (voice +0x1a0 is also the source of the protection module)
         auto mt = f32 (p.tmix * A[3]);
         if (mt >= 1.0)
@@ -5279,6 +5452,139 @@ private:
                 }
             }
         }
+    }
+
+    // resynthesis step (FUN_0088ab10, part +0x5c = 2; round natives190kj): phases set from the analysis on the first
+    // block, then every +0x164 blocks the partials' frequencies are bent so that their phase meets the analysed one
+    // after +0x168 samples — onsets (522 / 523) always, the bins of a peak's region locked to that peak with a
+    // positive sharpening (param 86), scaled by the sharpening and the play speed — and saved over f0
+    void resynthStep (Record& v, const Part& p, const Image& im) noexcept
+    {
+        const int n = v.n;
+        v.c180 = p.rs164;
+        const auto pos = v.ipos.pos;
+        float la0 = 1.0f;
+        if (im.s80 < pos && pos < im.s60)
+            la0 = (float) (1.0 - (pos - im.s80) / (im.s60 - im.s80));
+        la0 = p.sharp * la0;
+        float l9c = 1.0f;
+        {
+            const auto av = (float) (std::fabs (v.ipos.vel) * 1.5);
+            if (av < 1.0f)
+                l9c = av;
+        }
+        l9c = l9c * la0;
+        if (l9c > 0.0f || v.firstblk)
+        {
+            // FUN_00797870: the column at floor(pos): codes (rounded), phase 2·(plane − code) + advance · fraction
+            const auto fi = std::floor (pos);
+            const auto t = (float) (pos - fi);
+            const int col = im.colidx ((long long) fi);
+            const float* P2 = im.phase.data() + (std::size_t) col * (std::size_t) im.stride;
+            auto& an = rsAn;
+            auto& code = rsCode;
+            for (int i = 0; i < im.stride; ++i)
+            {
+                code[(std::size_t) i] = (int) std::nearbyint (P2[i]);
+                an[(std::size_t) i] = (P2[i] - (float) code[(std::size_t) i]) * 2.0f + im.adv[(std::size_t) i] * t;
+            }
+            if (! v.firstblk)
+            {
+                const int m = std::min (n - 4, im.rows);
+                const int u19 = m + 3, u20 = u19 & ~3;
+                auto& pred = rsPred;
+                auto& corr = rsCorr;
+                auto& kk = rsK;
+                const auto steps = (double) p.rs168;
+                for (int i = 0; i < u20; ++i)
+                    pred[(std::size_t) i] = v.ph[(std::size_t) (4 + i)] + v.f[(std::size_t) (4 + i)] * steps;
+                const auto dv32 = p.rs190 * (double) l9c;
+                auto k9c = (float) (p.rs190 * (double) std::min (l9c * 2.0f, 1.0f));
+                int cnt = 0;
+                if (p.rs170 < 1)
+                {
+                    for (int i = 0; i < u20; ++i)
+                    {
+                        const auto c = code[(std::size_t) i];
+                        if (c > 521 && c < 524)
+                            corr[(std::size_t) i] = (double) an[(std::size_t) i] - pred[(std::size_t) i], cnt += 523 - c;
+                        else
+                            corr[(std::size_t) i] = 0.0;
+                    }
+                }
+                else
+                {
+                    // FUN_00890150: the partials' Hz (voice +0x190, at least C0) of this step's frequencies (the rebuild
+                    // invalidated them, +0x1a8 = 0); they stay as they are for the rest of the block, as FL keeps them
+                    v.hzdirty = true;
+                    hzarr (v);
+                    hzKeep = true;
+                    const auto kmul = (float) (dv32 * 8.333333333333333e-05), kmax = (float) dv32;
+                    for (int i = 0; i < u20; ++i)
+                        kk[(std::size_t) i] = std::min (v.hz[(std::size_t) (4 + i)] * kmul, kmax);
+                    for (int i = 0; i < u20; ++i)
+                    {
+                        const auto c = code[(std::size_t) i];
+                        if (c < 524)
+                        {
+                            if (c < 522)
+                            {
+                                auto pk = c - 2;
+                                if (pk >= n - 4)
+                                    pk = n - 5;
+                                pk = std::max (pk, 0);
+                                corr[(std::size_t) i] = ((pred[(std::size_t) pk] - pred[(std::size_t) i]) + (double) an[(std::size_t) i])
+                                                        - (double) an[(std::size_t) pk];
+                            }
+                            else
+                            {
+                                corr[(std::size_t) i] = (double) an[(std::size_t) i] - pred[(std::size_t) i];
+                                kk[(std::size_t) i] = k9c;
+                                cnt += 523 - c;
+                            }
+                        }
+                        else
+                            corr[(std::size_t) i] = 0.0;
+                    }
+                }
+                if (cnt >= (u19 >> 2) && p.sharp >= 0.5f)
+                {
+                    // a broadband onset at another speed than 1: the read position is nudged toward it
+                    const auto vf = (float) v.ipos.vel;
+                    const double sg = std::fabs (vf) == 0.0f ? 0.0 : (vf < 0.0f ? -1.0 : 1.0);
+                    const auto la8 = (float) (sg - v.ipos.vel);
+                    if ((double) 5.960464477539063e-08f < std::fabs ((double) la8))
+                    {
+                        const auto x = v.ipos.scrub + la8;
+                        v.ipos.scrub = x < -4.0f ? -4.0f : (x > 4.0f ? 4.0f : x);
+                    }
+                    k9c = (float) (p.rs190 * (double) std::min (la0 * 2.0f, 1.0f));
+                }
+                if (p.rs170 < 1)
+                    for (int i = 0; i < u20; ++i)
+                    {
+                        const auto x = corr[(std::size_t) i];
+                        v.f[(std::size_t) (4 + i)] = v.f[(std::size_t) (4 + i)] + (x - std::nearbyint (x)) * (double) k9c; // (cvtpd2dq: nearest)
+                    }
+                else
+                    for (int i = 0; i < u20; ++i)
+                    {
+                        const auto x = corr[(std::size_t) i];
+                        v.f[(std::size_t) (4 + i)] = v.f[(std::size_t) (4 + i)] + (x - std::nearbyint (x)) * (double) kk[(std::size_t) i];
+                    }
+            }
+            else
+            {
+                const int u20 = (im.rows + 3) & ~3;
+                const auto st = -(double) p.rs168;
+                for (int i = 0; i < u20 && 4 + i < bankSize; ++i)
+                    v.ph[(std::size_t) (4 + i)] = v.ph[(std::size_t) (4 + i)] + ((double) an[(std::size_t) i] + v.f[(std::size_t) (4 + i)] * st);
+            }
+        }
+        const auto inv = (double) (1.0f / (float) v.f0fs32);
+        for (int i = 0; i < n; ++i)
+            v.rsSaved[(std::size_t) i] = v.f[(std::size_t) i] * inv;
+        v.n184 = n;
     }
 
     // ---- modules (FUN_00886xxx) ----
@@ -6386,12 +6692,16 @@ public:
                 current = std::move (pending), pending.reset();
             if (current != nullptr && current->fs != sr && ! state.empty())
                 if (auto S = parseState (state))
+                {
+                    S->engineRev = engineRev;
                     current = buildPatch (*S, sr, bpm, compState);
+                }
             retired.reset();
         }
         engine.setPoolSize (current.get());
         engine.setPatch (current.get());
         engine.seedRandom (fixedSeed);
+        reapplyAutomation();
     }
 
     void configure (const ChannelDef& channel, double songBpm) noexcept override
@@ -6413,16 +6723,20 @@ public:
                     comp[k] = (std::uint8_t) std::clamp ((int) mp[k + 1], 0, 255);
             }
         }
-        if (channel.pluginState == state && b == bpm && comp == compState)
+        if (channel.pluginState == state && b == bpm && comp == compState && channel.engineRev == engineRev)
             return;
         state = channel.pluginState;
+        engineRev = channel.engineRev;
         compState = std::move (comp);
         bpm = b;
         std::shared_ptr<const Patch> built;
         try
         {
             if (auto S = parseState (state))
+            {
+                S->engineRev = engineRev;
                 built = buildPatch (*S, preparedRate.load(), bpm, compState);
+            }
         }
         catch (...)
         {
@@ -6459,7 +6773,12 @@ public:
         const auto knob = pitchCents.load();
         const auto fpitch = 100.0 * key - 6000.0 + (double) knob + (double) nextCents;
         engine.nextLiveRef = live.ref (knob);
-        engine.setLynxNote (engine.noteOn (key, vel, channelVol, (double) nextPan + channelPan, fpitch, (double) nextPan), startingNoteId());
+        // round 190pr: Harmor never asks the host to unlink the velocity (no voice event 6 at TriggerVoice [EXEC: hm.exe's
+        // host log]), so FL's Final.Vol is Init.Vol × the channel volume (Lightning's "sub bass": velocity 128 / 88 notes
+        // +6.3 / −2.8 dB against 100 in FL's render, LYNX before: the same level); engine revision < 3: Init.Vol 1
+        const auto initVol = engineRev >= 3 ? (std::pow (11.0, 1.28 * vel) - 1.0) / 10.0 : 1.0;
+        engine.setLynxNote (engine.noteOn (key, vel, channelVol * initVol, (double) nextPan + channelPan, fpitch, (double) nextPan, initVol),
+                            startingNoteId());
         nextPan = 0.0f;
         nextCents = 0.0f;
     }
@@ -6473,6 +6792,30 @@ public:
     }
 
     void allNotesOff() noexcept override { engine.allNotesOff(); }
+
+    // FL's slide notes move the sounding notes' Init.Vol (issue #236; round 190pr, engine revision 3 on: Harmor's level
+    // follows it through FL's link velocity, as Sytrus' and Ogun's do)
+    void voiceProperty (int key, int prop, float value) noexcept override
+    {
+        if (engineRev < 3 || prop != 0 /* vfx::Prop::velocity */ || ! std::isfinite (value))
+            return;
+        take();
+        engine.setNoteInitVol (key, (std::pow (11.0, 1.28 * std::clamp ((double) value, 0.0, 1.0)) - 1.0) / 10.0, channelVol);
+    }
+
+    // FL's automation (clips, pattern events) of the parameters harmor::automatable lists, value = FL's normalised one;
+    // projects saved before round 190pr (engine revision < 3) keep ignoring it (round 190pr)
+    void setParameter (int index, float value) noexcept override
+    {
+        if (engineRev < 3 || ! harmor::automatable (index) || ! std::isfinite (value))
+            return;
+        take();
+        const auto raw = harmor::flRawOf (index, (double) std::clamp (value, 0.0f, 1.0f));
+        for (std::size_t i = 0; i < automatedIndex.size(); ++i)
+            if (automatedIndex[i] == index)
+                automatedRaw[i] = raw;
+        applyAutomated (index, raw);
+    }
 
     bool idle() const noexcept override { return engine.idle() && engine.rackQuiet(); }
 
@@ -6514,7 +6857,29 @@ private:
         current = std::move (pending);
         pending.reset();
         engine.setPatch (current.get());
+        reapplyAutomation();
     }
+
+    // Round 190pr: FL's automation of the parameters harmor::automatable lists (engine revision 3 on), as FL's
+    // ProcessParam stores them [DECOMP FUN_00879540]: Mod X / Y / Z = raw / 512 (the voices glide to it through their own
+    // X / Y / Z smoothing), a filter's frequency knob = lo + raw / 8192 · span in double (each voice's knob follows it
+    // with its own smoothing). This instance built its patch, so it may change it in place (audio thread).
+    void applyAutomated (int k, int raw) noexcept
+    {
+        if (auto* P = const_cast<Patch*> (current.get()))
+            applyFlParam (*P, k, raw);
+    }
+
+    void reapplyAutomation() noexcept
+    {
+        for (std::size_t i = 0; i < automatedIndex.size(); ++i)
+            if (automatedRaw[i] != noValue)
+                applyAutomated (automatedIndex[i], automatedRaw[i]);
+    }
+
+    static constexpr std::array<int, 7> automatedIndex { 52, 64, 438, 450, 772, 773, 774 };
+    static constexpr int noValue = std::numeric_limits<int>::min();
+    std::array<int, 7> automatedRaw { noValue, noValue, noValue, noValue, noValue, noValue, noValue };
 
     Engine engine;
     std::mutex mutex;
@@ -6524,6 +6889,7 @@ private:
     std::atomic<float> pitchCents { 0.0f };
     LiveChannelPitch live; // (audio thread)
     std::vector<std::uint8_t> state, compState;
+    int engineRev = 1;
     double bpm = 120.0, rate = 44100.0, channelVol = 1.0, channelPan = 0.0;
     float nextPan = 0.0f, nextCents = 0.0f;
 };
@@ -6547,6 +6913,22 @@ std::vector<std::string> harmorFallbacks (const std::vector<std::uint8_t>& state
     if (! S)
         return { "state not usable" };
     return buildPatch (*S, 44100.0, 120.0)->fallbacks;
+}
+
+bool harmorUsesResynthesis (const std::vector<std::uint8_t>& state)
+{
+    // (rollup 0.1.30 step 6: Save a copy for 0.1.28 reports the channels whose sound round natives190kj changed)
+    try
+    {
+        if (const auto S = parseState (state))
+            for (const auto& part : S->parts)
+                if (part.present && parseImage (part.tailBytes).resynth)
+                    return true;
+    }
+    catch (...)
+    {
+    }
+    return false;
 }
 
 std::optional<std::vector<std::uint8_t>> harmorUpgradeState (const std::vector<std::uint8_t>& state)
@@ -6585,16 +6967,118 @@ std::unique_ptr<Instrument> makeHarmorInstrument() { return std::make_unique<Har
 
 namespace harmor
 {
+namespace
+{
+// FL's raw range of every parameter (REA_rodada190pr, EXEC: Harmor_x64.dll's own ProcessParam with REC_FromMIDI at
+// 0 and 2^30, read back with REC_GetValue; parts A and B alike)
+// part parameters 0…385 (parts A and B alike)
+constexpr std::array<std::pair<int, int>, 386> flPartRanges { {
+    { 0, 999 }, { -1000, 1000 }, { -384, 384 }, { 0, 1000 }, { 0, 1000 }, { 0, 2048 }, { 0, 2048 }, { 0, 2048 },
+    { 0, 1024 }, { 0, 1024 }, { -1000, 1000 }, { -2000, 2000 }, { 0, 2000 }, { 0, 1000 }, { 0, 1 }, { 0, 1 },
+    { 0, 1 }, { 0, 1000 }, { 0, 10000 }, { 0, 999 }, { 0, 1000 }, { 0, 1600 }, { 0, 1600 }, { 0, 10000 },
+    { 0, 1000 }, { 0, 1000 }, { -1000, 1000 }, { 0, 1000 }, { 0, 1000 }, { 0, 1024 }, { -2, 7 }, { -7, 8 },
+    { -1, 8 }, { -7, 8 }, { 1, 9 }, { 0, 4 }, { 0, 1 }, { 0, 256 }, { 0, 256 }, { -1000, 1000 }, { 10000, 160000 },
+    { 1, 9 }, { 10000, 160000 }, { 1, 9 }, { -6000, 6000 }, { 0, 1000 }, { 0, 1000 }, { 0, 1 }, { 0, 1 },
+    { -384, 384 }, { 0, 1200 }, { 0, 1 }, { 0, 8192 }, { 0, 1 }, { 0, 1000 }, { -2000, 2000 }, { -1000, 1000 },
+    { 0, 1000 }, { 0, 1 }, { 0, 1000 }, { -2400, 2400 }, { 0, 1 }, { 0, 2048 }, { 0, 1 }, { 0, 8192 }, { 0, 1 },
+    { 0, 1000 }, { -2000, 2000 }, { -1000, 1000 }, { 0, 1000 }, { 0, 1 }, { 0, 1000 }, { -2400, 2400 }, { 0, 1 },
+    { -1000, 1000 }, { 0, 1000 }, { 0, 1000 }, { 0, 2 }, { 0, 10000 }, { 0, 999 }, { -8000, 8000 },
+    { -2000, 2000 }, { -1000, 1000 }, { 0, 1048575 }, { -20000, 20000 }, { -60000, 60000 }, { -1000, 1000 },
+    { 0, 6 }, { 0, 1000 }, { 0, 1000 }, { 0, 3 }, { 0, 6 }, { -2000, 2000 }, { -600, 600 }, { 0, 1000 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 256 }, { 0, 256 }, { -128, 128 }, { 0, 256 }, { 512, 65536 }, { -128, 128 }, { -128, 128 }, { -112, 112 },
+    { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 },
+    { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 },
+    { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 },
+    { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 },
+    { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 }, { 0, 1001 },
+    { 0, 1001 }, { 0, 1001 }, { 0, 1001 }
+} };
+// global parameters 0…52
+constexpr std::array<std::pair<int, int>, 53> flGlobalRanges { {
+    { 0, 512 }, { 0, 512 }, { 0, 512 }, { 0, 2400 }, { 0, 1 }, { 0, 1 }, { 0, 1 }, { 0, 3 }, { 0, 1000 },
+    { -1000, 1000 }, { 0, 1000 }, { 0, 2000 }, { 0, 2000 }, { 0, 1 }, { -2400, 2400 }, { -1000, 1000 }, { 0, 1 },
+    { 0, 1000 }, { -500, 500 }, { 0, 2000 }, { -1000, 1000 }, { 500, 1100 }, { 0, 1 }, { 0, 1000 }, { 400, 1050 },
+    { -384, 384 }, { 1, 100 }, { 0, 100 }, { 0, 900 }, { 400, 1050 }, { 0, 4 }, { -1000, 1000 }, { 0, 9 },
+    { 0, 1024 }, { 0, 1024 }, { 0, 128 }, { 0, 128 }, { -128, 128 }, { -1000, 1000 }, { 0, 1 }, { 0, 2 },
+    { 0, 1000 }, { -384, 384 }, { -512, 512 }, { -1000, 1000 }, { -128, 128 }, { 0, 1000 }, { 400, 1050 },
+    { 0, 1 }, { 0, 1000 }, { 0, 2000 }, { 0, 2000 }, { 0, 2000 }
+} };
+} // namespace
+
+std::optional<std::pair<int, int>> flParamSlot (int k) noexcept
+{
+    if (k < 0 || k >= flParamCount)
+        return std::nullopt;
+    if (k >= 772)
+        return std::pair { -1, k - 772 };
+    return std::pair { k / 386, k % 386 };
+}
+
+std::optional<std::pair<int, int>> flParamRange (int k) noexcept
+{
+    const auto slot = flParamSlot (k);
+    if (! slot)
+        return std::nullopt;
+    return slot->first < 0 ? flGlobalRanges[(std::size_t) slot->second] : flPartRanges[(std::size_t) slot->second];
+}
+
+bool flParamInState (int k) noexcept
+{
+    const auto slot = flParamSlot (k);
+    return slot && (slot->first < 0 || slot->second < 95 || slot->second > 342); // (95…342: the articulators, FUN_00879380)
+}
+
+int flRawOf (int k, double v) noexcept
+{
+    const auto r = flParamRange (k);
+    if (! r)
+        return 0;
+    return r->first + (int) std::nearbyint (std::clamp (v, 0.0, 1.0) * (double) (r->second - r->first)); // (half to even)
+}
+
+bool automatable (int k) noexcept { return k == 52 || k == 64 || k == 438 || k == 450 || (k >= 772 && k <= 774); }
+
 float ippExpA11Model (float x) noexcept { return ippExpA11 (x); }
 float ippLnA11Model (float x) noexcept { return ippLnA11 (x); }
 
 std::vector<float> renderReference (const std::vector<std::uint8_t>& state, const std::vector<RefNote>& notes, double sampleRate,
                                     int length, int block, const std::vector<std::uint32_t>& mt, double bpm,
-                                    const std::vector<std::uint8_t>& compressorState)
+                                    const std::vector<std::uint8_t>& compressorState, int engineRev, const std::vector<RefParam>& params)
 {
-    const auto S = parseState (state);
+    auto S = parseState (state);
     if (! S || length <= 0)
         return {};
+    S->engineRev = engineRev;
     const auto patch = buildPatch (*S, sampleRate, bpm, compressorState);
     auto engine = std::make_unique<Engine>();
     engine->setPoolSize (patch.get());
@@ -6611,6 +7095,8 @@ std::vector<float> renderReference (const std::vector<std::uint8_t>& state, cons
         if (nt.release >= 0)
             evs.push_back (nt.release);
     }
+    for (const auto& pr : params)
+        evs.push_back (pr.at);
     std::sort (evs.begin(), evs.end());
     std::vector<int> handle (notes.size(), -1);
     std::vector<float> out (2 * (std::size_t) length, 0.0f), l ((std::size_t) Engine::maxHostBlock), r (l.size());
@@ -6622,6 +7108,9 @@ std::vector<float> renderReference (const std::vector<std::uint8_t>& state, cons
         for (auto e : evs)
             if (n0 < e && e < n0 + ln)
                 ln = e - n0;
+        for (const auto& pr : params) // (before the notes of the same sample, as the harness sends them)
+            if (pr.at == n0)
+                applyFlParam (*patch, pr.k, pr.raw);
         for (std::size_t i = 0; i < notes.size(); ++i)
             if (notes[i].start == n0)
                 handle[i] = engine->noteOn (notes[i].key, notes[i].velocity, notes[i].finalVol, notes[i].finalPan,

@@ -229,6 +229,148 @@
 #    one that receives it, as OLE (Windows) and AppKit (macOS) pick the innermost registered window. A program with one
 #    XdndAware window (most) is reached as before.
 #
+# 37. Every platform, juce_gui_basics/menus/juce_PopupMenu.cpp + widgets/juce_ListBox.cpp (issue #182, round 190ib): type-to-jump.
+#    JUCE's menus and lists take no typed letters. A typed character (no Ctrl / Cmd / Alt) now asks `lynxTypeAheadHook`
+#    (set by LYNX, ui/TypeAhead.h; the rule is core/TypeAhead.h) which row to go to: the first letter jumps to the next
+#    item that starts with it, more letters typed within a second narrow it to a longer prefix. A menu highlights the
+#    item (Enter runs it, a submenu opens with Right as before); fix 13's accelerator letters still win in menus that
+#    have them, except while a prefix is being typed (within a second of a key that jumped); a space typed then is part of
+#    the prefix (JUCE: Space runs the item). A ListBox selects the row (and scrolls to it) when its model names its rows (getNameForRow; JUCE's
+#    default "Row N" names are left alone). Null hook: JUCE's keys only.
+#
+# 38. Linux/BSD only (37 is round 190ib's), juce_gui_basics/native/juce_Windowing_linux.cpp (issue #188, round 190ir): a
+#    minimised LYNX window (Settings, Tap tempo...) kept swallowing the clicks on the main window where it had been.
+#    JUCE's X11 peer decides whether a point is "in" a window by asking every JUCE window above it in JUCE's own list
+#    (not the X server's stacking) whether it covers that point, from its bounds alone. A minimised window is still
+#    `isVisible()` for JUCE and keeps its bounds, and LYNX keeps its secondary windows above the main window in that list
+#    (matchWindowOrderToScreen, issue #12), so the main window answered "not mine" there and MouseInputSource dropped
+#    the click (findComponentAt -> nullptr). Nothing in the X server or the window manager is involved, so it happens
+#    with every WM: KWin on X11 or Wayland (LYNX runs through XWayland there), GNOME, openbox (reproduced on Xvfb).
+#    A window above now covers the point only while it is on the screen: mapped and viewable, and not minimised
+#    (_NET_WM_STATE_HIDDEN). The X round trips run only for a point inside such a window's bounds.
+#
+# 39. Every platform, juce_audio_processors/format_types/juce_VST3Common.h + juce_VST3PluginFormat.cpp (round 190jg,
+#    BUILD-LIST 18): sample-accurate automation. JUCE's VST3 host sends each parameter's value once per block, at offset
+#    0 (AudioProcessorParameter::setValue has no time). LYNX's renderer applies automation once per piece of up to 128
+#    samples; with this fix the changes inside a piece (a ramp every 16 samples, a jump at its own sample) reach the
+#    plugin's IParamValueQueue as points at their sample offsets, from four thread-local declarations LYNX sets while
+#    the plugin's block runs (engine/TimedParameters.h). Unset (another host, the option off): JUCE's behaviour.
+# 40. Every platform (39 in round 190je's branch), juce_gui_basics/menus/juce_PopupMenu.cpp (round 190je, design190ia FW-13): long menus in FL's columns.
+#    JUCE splits a menu without column breaks only when it no longer fits on the screen, and then into columns with the
+#    same number of items each, wherever that falls (in the middle of a group). FL splits its long context menus into
+#    two columns at a group (the Channel rack menu: 305 px, LYNX's 951). Such a menu now asks `lynxTallMenuBreakHook`
+#    (set by LYNX, ui/Theme.cpp; the rule is core/ThemePalette.h tallMenuBreak) where to break: menus taller than 70 % of
+#    the screen split once, before a section header or after a separator, where the two columns come out most even. An
+#    answer of -1 (or a null hook) leaves JUCE's own split.
+# 41. Linux/BSD only (39 in round 190jx's branch), juce_gui_basics/native/juce_Windowing_linux.cpp (round 190jx): the X11 backend of LYNX's moving
+#    marks (ui/MotionOverlay.h, ui/MotionOverlayX11.h) draws a playhead with the X server over a window's pixels and
+#    keeps the pixels under it. It must know when JUCE replaced pixels there: after the repaint manager blits its
+#    rectangles to a window, `lynxX11AfterBlitHook` (set by LYNX) gets the window and the rectangles (window pixels), and
+#    the marks there are drawn again over the new pixels, in the same order of requests on the same connection.
+#    `lynxX11Display()` hands LYNX JUCE's display connection (so its requests are ordered with JUCE's). Null hook: nothing.
+# 42. Every platform ("fix 190kq" in round qafix190kq's branch), juce_gui_basics/menus/juce_PopupMenu.cpp (round
+#    qafix190kq, QA of 0.1.30): fix 40's split skips a menu whose target component has the property
+#    "lynxOneColumnMenu" set (the menu bar's View menu: LYNX opens a submenu beside its parent's outer edge, issue
+#    #18, so "Layout style" in the first of two columns had its submenu beyond the second one). Such a menu stays one
+#    column while it fits on the screen; taller, JUCE's own split applies.
+#
+# 43. Windows only ("fix 190la" in round 190la's branch), juce_graphics/native/juce_DirectX_windows.h (round 190la, perf A/B switch): with
+#    LYNX_D3D_DRIVER_THREADS=0 the Direct3D 11 device JUCE's Direct2D windows draw with is made with
+#    D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS: the graphics driver stops handing each frame's commands
+#    to threads of its own. Measured on Thief playing (RTX 3060): NVIDIA's thread 353 -> 4 Mcycles/s, but the message
+#    thread +316, so the process total is the same; 11 fewer threads and -27 % wake-ups. Off by default (the message
+#    thread is the UI's frame budget); the default creates the device as JUCE does.
+#
+# 44. Windows only ("fix 190la-b" in round 190la's branch), juce_core/threads/juce_WaitableEvent.cpp (round 190la, perf): libc++ (the zig toolchain's)
+#    implements a timed condition-variable wait on Windows with SleepConditionVariableSRW and the time left truncated
+#    to whole milliseconds (thread_win32.cpp __libcpp_condvar_timedwait): with under 1 ms left it does not sleep, and
+#    wait_for's loop spins until the deadline. Every JUCE timed wait (WaitableEvent::wait (ms): Thread::wait, the timer
+#    thread, thread pools, LYNX's prefetcher) ended in such a spin: the JUCE timer thread alone used ~150 Mcycles/s
+#    (~4 % of a core) with LYNX at rest (Frida + QueryThreadCycleTime, round 190la). The wait now sleeps whole
+#    milliseconds rounded up (the event may be seen up to ~1 ms later than its deadline, never earlier).
+#    scripts/build-windows-zig.sh patches juce_core for this one file.
+#
+# 45. Every platform ("fix 190ms" in round paint2_190ms's branch), juce_graphics/native/juce_RenderingHelpers.h
+#    (round 190ms, perf of JUCE's software renderer; both parts give the same pixels by construction):
+#    a) fillPath built each path's edge table over the whole clip's bounds: a table row per pixel row of the clip
+#       (allocated, cleared, sorted and walked) for every shape, so a 20 px rounded rectangle in a whole-window repaint
+#       cost as much as ~1000 empty rows. The table now covers the clip's rows from one above the path's bounds to one
+#       below (all the clip's columns): the rows outside held no edge, and an edge point's row is never outside the
+#       path's rows. The columns stay the clip's: EdgeTable extrapolates a nearly flat segment from its rounded start
+#       row, so an edge point can land pixels beyond the path's bounds and is clamped to the table's columns (a cut of
+#       the columns too changed 3 pixels of a filter curve by 1 level; --selftest paint_caches checks both).
+#    b) ImageFill::copyRow (an opaque RGB image drawn into an ARGB image at full opacity, e.g. LYNX's cached keycap and
+#       step strips): the same pixel conversion as PixelARGB::blend (PixelRGB) = set, one 4-byte load per pixel instead
+#       of three byte loads (little-endian platforms where PixelRGB is stored b, g, r; others keep JUCE's loop).
+#
+# 46. Every platform ("fix 190ms-glyph" in round paint2_190ms's branch): JUCE's two text caches of 128 entries
+#    (juce_LruCache.h's default) hold 1024 (round 190ms, perf; owner's decision on round 190ml's Helix window):
+#    a) juce_graphics/contexts/juce_GraphicsContext.cpp, the shaped lines Graphics::drawText / drawFittedText /
+#       drawSingleLineText / drawMultiLineText keep per (font, text, area, justification...): a window with more than
+#       128 distinct labels (Helix+ 2's channel window, round 190ml) shaped every label again on every whole repaint
+#       (fontconfig fallback look-ups included: 67 % of that window's paint; 22-25 ms a frame, 3-5 ms with either half
+#       of it hidden). drawSingleLineText's key now holds its justification flags too (it was left out of the key, so
+#       two calls that differ only there could get each other's line). The four keys compare their cheap fields
+#       (position / area, justification, numbers) first, then the text, the font last: JUCE compared the font
+#       (FontOptions, strings first: ~1000 instructions) first, and a 1024-entry tree is three levels deeper (Windows
+#       inserts50 Playlist +4 % before this). Same fields, so the same equal keys and lines.
+#    b) juce_graphics/native/juce_RenderingHelpers.h, the software renderer's glyphs (each glyph's outline as an edge
+#       table, per font and size): every whole frame of the main views evicted and rebuilt glyphs (-6 ... -12 %
+#       paint instructions a whole frame with 1024). Its keys are ordered by the glyph, then a hash of the font's name,
+#       style, height and width, then the font: JUCE compared whole FontOptions (strings first) at every tree node of
+#       the same glyph, ~5 compares of ~1000 instructions per glyph drawn (12 % of a frame; with 1024 entries the
+#       deeper tree made Clip-launch's Arrangement +9 % slower before this). Equal keys stay JUCE's equal keys.
+#    Both caches are pure functions of their keys, so the pixels are the same; the memory is a few MB at most.
+#
+# 47. Every platform ("fix 190oh" in round online_host_190oh's branch),
+#    juce_audio_processors/format_types/juce_VST3PluginFormat.cpp (round 190oh, P3: FL's wrapper Settings › GUI): the
+#    VST3 editor window's two size conversions (componentToVST3Rect / vst3ToComponentRect) leave the display's scale out
+#    when LYNX marked the editor "lynxScaleEditorDimensions" (FL's "Scale editor dimensions", or a DPI-unaware window):
+#    the size the plugin reports is then taken in logical pixels. An editor LYNX did not mark is sized as before.
+#
+# 48. Windows only ("fix 190os" in round perf6_190os's branch), juce_graphics/native/juce_DirectX_windows.h,
+#    on top of fix 43: the Direct3D 11 device has no driver threads by default when LYNX may use 4 logical CPUs or
+#    fewer (LYNX_D3D_DRIVER_THREADS=1: always the driver's threads; =0: never, as fix 43). Measured with a song that
+#    overloads a PC with 2 CPUs (big200 at 64 samples, the safe-overload guard engaged): the message thread spent 80-100 %
+#    of every frame gap over 50 ms waiting in NVIDIA's driver for its own thread, which got the CPU only between the
+#    audio threads; with no driver threads 51.4 fps and the longest gap 46-70 ms (from 45.0 / 252 ms). With 12 CPUs the
+#    same with or without (69-72 fps): there the driver's threads stay. perf190os/HANDOFF.md.
+#
+# 49. Linux/BSD only ("fix 190ou" in round bugs_190ou's branch),
+#    juce_gui_basics/native/juce_XWindowSystem_linux.cpp (issue #254): X11 reports a horizontal wheel (a tilt wheel, a
+#    mouse's second wheel, a touchpad's sideways edge) as buttons 6 (left) and 7 (right), which JUCE dropped: the
+#    horizontal wheel did nothing on Linux. They now come as a wheel event with deltaX = +/-50/256 (6 = left = positive,
+#    as Windows' WM_MOUSEHWHEEL gives it through JUCE) and deltaY 0, not smooth.
+#
+# 50. ("fix 50" in round lv2_190pk's branch; the LV2 plugin pack on Linux):
+#  a. Linux/BSD only, juce_gui_basics/native/juce_XWindowSystem_linux.cpp: WM_PROTOCOLS, WM_TAKE_FOCUS, WM_DELETE_WINDOW
+#     and _NET_WM_PING are created when missing, as JUCE already does for its other atoms. On an X server no window
+#     manager ever ran on (a fresh Xvfb, CI's xvfb-run) they don't exist, so every new window set its WM_PROTOCOLS
+#     property with atom 0: BadAtom on X_ChangeProperty. A standalone JUCE app ignores X errors (its own handler); a
+#     plugin's host has Xlib's default handler, which ends the process: plugexporttest ended on LYNX FM10's and LYNX
+#     Model's LV2 editors. isIconic / isHidden no longer read WM_STATE / _NET_WM_STATE when those atoms don't exist
+#     (BadAtom on X_GetProperty, the next error the LV2 editors hit there).
+#  b. Every platform (compiled only for LV2), juce_audio_plugin_client/juce_audio_plugin_client_LV2.cpp: JUCE's LV2
+#     wrapper enables every bus and declares the ports of a bus that is off by default (the effects' side chain)
+#     lv2:connectionOptional, i.e. a host may connect them to NULL, but it copied the input from there: the 6 LV2 effects
+#     crashed in their first run() under JUCE's own LV2 host, which connects NULL for each channel its buffer lacks. An
+#     unconnected input is silence now, and an unconnected output is skipped while the processor is suspended. The
+#     .ttl files it writes (juce_LV2ManifestHelper) give parameter ranges and scale points as decimals ("1.0": "1" is an
+#     integer, which lv2lint failed on every parameter), and an effect its LV2 class when the build defines
+#     JucePlugin_LV2Class (cmake/LynxPlugins.cmake, from the VST3 category; else lv2:Plugin, as before).
+#
+# 51. Every platform (compiled only for LV2; round 190qd, the 0.1.31 release, owner OK 11-23),
+#    juce_audio_plugin_client/juce_audio_plugin_client_LV2.cpp: the plugin's .ttl that JUCE's LV2 manifest helper writes
+#    names its licence, `doap:license <http://spdx.org/licenses/AGPL-3.0-or-later>` (LYNX's plugins are AGPL-3.0-or-later,
+#    LICENSE). JUCE wrote none, and lv2lint warned on every LV2 plugin of the pack ("no license specified").#
+# 52. Linux/BSD only ("fix 190rb" in round qa_190rb's branch; round 190rb, the 0.1.32 quality release, in 0.1.31.2), juce_events/native/juce_Messaging_linux.cpp:
+#    the event loop gathers the file-descriptor callbacks that are ready, then calls them one after the other. One of
+#    them can unregister another's (the X11 events close a plugin's editor; the last VST3 editor takes JUCE's VST3 run
+#    loop with it, whose destructor unregisters its descriptors; a CLAP plugin's descriptors go with the plugin), and the
+#    gathered copy still called the unregistered callback, whose owner was gone: two 0.1.31.1 Linux crash reports
+#    (an unordered_map look-up on a freed VST3 RunLoop::Impl right after the main loop's callback). A callback that is
+#    no longer registered when its turn comes is skipped now.
+#
 # Used by CMake (lynx_patch_juce on the fetched JUCE) and by scripts/build-windows-zig.sh, which runs this file with
 # `cmake -DJUCE_DIR=<a copy of JUCE's juce_gui_basics module> -P cmake/LynxPatchJuce.cmake`.
 
@@ -307,6 +449,31 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("menu accelerator keys" "LYNX patch (round 170a): accelerator letters"
             "            dismissMenu (nullptr);|NL|        }|NL|        else|NL|        {|NL|            return false;|NL|        }"
             "            dismissMenu (nullptr);|NL|        }|NL|        else if (! lynxMenuMnemonic (key)) // LYNX patch (round 170a): accelerator letters|NL|        {|NL|            return false;|NL|        }")
+        lynx_juce_fix("tall menus in two columns: the hook" "LYNX patch (round 190je): long menus in FL's columns"
+            "namespace PopupMenuSettings|NL|{|NL|"
+            "// LYNX patch (round 190je): long menus in FL's columns (cmake/LynxPatchJuce.cmake, fix 40). Set by LYNX (ui/Theme.cpp):|NL|// the item after which a menu of `count` items (`heights`; `kinds` 0 item, 1 separator, 2 section header) breaks into a|NL|// second column on a screen `screenHeight` tall, -1 for JUCE's own split. Null: JUCE's split only.|NL|int (*lynxTallMenuBreakHook) (const int* heights, const int* kinds, int count, int screenHeight) = nullptr;|NL||NL|namespace PopupMenuSettings|NL|{|NL|")
+        lynx_juce_fix("tall menus in two columns: the split" "LYNX patch (round 190je): a tall menu without column breaks"
+            "        numColumns = numBreaks + 1;|NL||NL|        if (numBreaks == 0)|NL|            insertColumnBreaks (maxMenuW, maxMenuH);"
+            "        numColumns = numBreaks + 1;|NL||NL|        // LYNX patch (round 190je): a tall menu without column breaks splits in two at a group, as FL's (fix 40)|NL|        if (numBreaks == 0 && lynxTallMenuBreakHook != nullptr && items.size() > 3)|NL|        {|NL|            std::vector<int> lynxHeights, lynxKinds;|NL|            for (auto* child : items)|NL|            {|NL|                lynxHeights.push_back (child->getHeight());|NL|                lynxKinds.push_back (child->item.isSeparator ? 1 : child->item.isSectionHeader ? 2 : 0);|NL|            }|NL||NL|            const auto lynxAt = lynxTallMenuBreakHook (lynxHeights.data(), lynxKinds.data(), (int) lynxHeights.size(), maxMenuH + 24);|NL||NL|            if (isPositiveAndBelow (lynxAt, items.size() - 1))|NL|            {|NL|                items[lynxAt]->item.shouldBreakAfter = true;|NL|                numColumns = 2;|NL|            }|NL|        }|NL||NL|        if (numColumns == 1)|NL|            insertColumnBreaks (maxMenuW, maxMenuH);")
+        lynx_juce_fix("one-column menus (fix 42)" "LYNX patch (fix 42): not a menu whose target"
+            "        // LYNX patch (round 190je): a tall menu without column breaks splits in two at a group, as FL's (fix 40)|NL|        if (numBreaks == 0 && lynxTallMenuBreakHook != nullptr && items.size() > 3)"
+            "        // LYNX patch (round 190je): a tall menu without column breaks splits in two at a group, as FL's (fix 40)|NL|        // LYNX patch (fix 42): not a menu whose target asks for one column (the property \"lynxOneColumnMenu\": the menu|NL|        // bar's View menu); JUCE's own split below still applies to it when it is taller than the screen|NL|        const auto* lynxTarget = options.getTargetComponent();|NL|        const auto lynxOneColumn = lynxTarget != nullptr && (bool) lynxTarget->getProperties().getWithDefault (\"lynxOneColumnMenu\", false);|NL||NL|        if (numBreaks == 0 && lynxTallMenuBreakHook != nullptr && items.size() > 3 && ! lynxOneColumn)")
+        lynx_juce_fix("menu type-to-jump" "LYNX patch (round 190ib, issue #182): type-to-jump"
+            "    bool keyPressed (const KeyPress& key) override|NL|    {|NL|        if (key.isKeyCode (KeyPress::downKey))"
+            "    // LYNX patch (round 190ib, issue #182): type-to-jump (fix 37): the item whose text starts with what was typed|NL|    bool lynxMenuTypeAhead (const KeyPress& key)|NL|    {|NL|        extern int (*lynxTypeAheadHook) (const void*, juce_wchar, int, int, const std::function<String (int)>&);|NL|        const auto mods = key.getModifiers();|NL|        const auto typed = key.getTextCharacter();|NL|        if (lynxTypeAheadHook == nullptr || typed < 32 || mods.isCtrlDown() || mods.isCommandDown() || mods.isAltDown())|NL|            return false;|NL||NL|        Array<ItemComponent*> rows;|NL|        for (auto* child : items)|NL|            if (canBeTriggered (child->item) || hasActiveSubMenu (child->item))|NL|                rows.add (child);|NL||NL|        const auto row = lynxTypeAheadHook (this, typed, rows.indexOf (currentChild.getComponent()), rows.size(),|NL|                                            [&rows] (int i) { return rows[i]->item.text; });|NL|        if (! isPositiveAndBelow (row, rows.size()))|NL|            return false;|NL||NL|        lynxTypedAt = Time::getMillisecondCounter();|NL|        disableTimerUntilMouseMoves();|NL|        ensureItemComponentIsVisible (*rows[row], -1);|NL|        setCurrentlyHighlightedChild (rows[row]);|NL|        return true;|NL|    }|NL||NL|    // a prefix is being typed (a key within a second of the last one that jumped): its next letters go to it first, not to|NL|    // the accelerator letters|NL|    uint32 lynxTypedAt = 0;|NL|    bool lynxTypingNow() const { return lynxTypedAt != 0 && Time::getMillisecondCounter() - lynxTypedAt < 1000; }|NL||NL|    bool keyPressed (const KeyPress& key) override|NL|    {|NL|        if (key.isKeyCode (KeyPress::downKey))")
+        lynx_juce_fix("menu type-to-jump keys" "LYNX patch (round 190ib): type-to-jump after them"
+            "        else if (! lynxMenuMnemonic (key)) // LYNX patch (round 170a): accelerator letters"
+            "        else if (! (lynxTypingNow() ? lynxMenuTypeAhead (key) || lynxMenuMnemonic (key) : lynxMenuMnemonic (key) || lynxMenuTypeAhead (key))) // LYNX patch (round 170a): accelerator letters; LYNX patch (round 190ib): type-to-jump after them")
+        lynx_juce_fix("menu type-to-jump: space inside a prefix" "LYNX patch (round 190ib): a space inside a typed prefix"
+            "        else if (key.isKeyCode (KeyPress::returnKey) || key.isKeyCode (KeyPress::spaceKey))|NL|        {|NL|            triggerCurrentlyHighlightedItem();"
+            "        else if (key.isKeyCode (KeyPress::returnKey) || (key.isKeyCode (KeyPress::spaceKey) && ! lynxTypingNow())) // LYNX patch (round 190ib): a space inside a typed prefix is typed|NL|        {|NL|            triggerCurrentlyHighlightedItem();")
+    elseif(file MATCHES "juce_ListBox.cpp$")
+        lynx_juce_fix("list type-to-jump: the hook" "LYNX patch (round 190ib, issue #182): type-to-jump"
+            "bool ListBox::keyPressed (const KeyPress& key)|NL|{|NL|"
+            "// LYNX patch (round 190ib, issue #182): type-to-jump (cmake/LynxPatchJuce.cmake, fix 37). Set by LYNX (ui/TypeAhead.h): the|NL|// row to go to after `typed` in a list (or menu) of `count` rows, -1 for none. Null: JUCE's keys only.|NL|int (*lynxTypeAheadHook) (const void* owner, juce_wchar typed, int current, int count, const std::function<String (int)>& textOf) = nullptr;|NL||NL|static int lynxListTypeAheadRow (const void* owner, ListBoxModel* model, const KeyPress& key, int current, int count)|NL|{|NL|    const auto mods = key.getModifiers();|NL|    const auto typed = key.getTextCharacter();|NL|    if (lynxTypeAheadHook == nullptr || model == nullptr || count <= 0 || typed < 32 || mods.isCtrlDown() || mods.isCommandDown() || mods.isAltDown())|NL|        return -1;|NL||NL|    if (model->getNameForRow (0) == \"Row 1\") // (JUCE's default names: the model doesn't name its rows)|NL|        return -1;|NL||NL|    return lynxTypeAheadHook (owner, typed, current, count, [model] (int row) { return model->getNameForRow (row); });|NL|}|NL||NL|bool ListBox::keyPressed (const KeyPress& key)|NL|{|NL|")
+        lynx_juce_fix("list type-to-jump: the keys" "LYNX patch (round 190ib): a typed character selects"
+            "        selectRangeOfRows (0, std::numeric_limits<int>::max());|NL|    }|NL|    else|NL|    {|NL|        return false;|NL|    }"
+            "        selectRangeOfRows (0, std::numeric_limits<int>::max());|NL|    }|NL|    else if (const auto lynxRow = lynxListTypeAheadRow (this, model, key, lastRowSelected, totalItems); lynxRow >= 0)|NL|    {|NL|        selectRow (lynxRow); // LYNX patch (round 190ib): a typed character selects the row that starts with it (fix 37)|NL|    }|NL|    else|NL|    {|NL|        return false;|NL|    }")
     elseif(file MATCHES "juce_Direct2DImage_windows.cpp$")
         lynx_juce_fix("image contexts without readback" "LYNX patch (round 174e2): no readback flag"
             "/*  Returns new software bitmap storage with content matching the provided hardware bitmap. */"
@@ -348,6 +515,18 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("no X focus for menu windows" "LYNX patch (issue #45): never takes the X focus"
             "    void grabFocus() override|NL|    {|NL|"
             "    void grabFocus() override|NL|    {|NL|        // LYNX patch (issue #45): never takes the X focus when it ignores key presses (a popup menu, a tooltip)|NL|        if ((getStyleFlags() & windowIgnoresKeyPresses) != 0)|NL|            return;|NL||NL|")
+        lynx_juce_fix("a minimised window covers nothing" "LYNX patch (issue #188): a window above"
+            "            if (auto* peer = static_cast<LinuxComponentPeer*> (otherPeer))|NL|                if (peer->contains (globalToLocal (*peer, localToGlobal (*this, localPos.toFloat())).roundToInt(), true))|NL|                    return false;|NL|"
+            "            // LYNX patch (issue #188): a window above covers the point only while it is on the screen (a minimised|NL|            // window keeps its bounds and stays visible for JUCE; the X round trips only inside its bounds)|NL|            if (auto* peer = static_cast<LinuxComponentPeer*> (otherPeer))|NL|                if (peer->contains (globalToLocal (*peer, localToGlobal (*this, localPos.toFloat())).roundToInt(), true)|NL|                    && peer->lynxIsOnScreen())|NL|                    return false;|NL|")
+        lynx_juce_fix("X11 blits told to LYNX: the hook" "LYNX patch (round 190jx): the hook LYNX's moving marks"
+            "class LinuxComponentPeer final : public ComponentPeer,"
+            "// LYNX patch (round 190jx): the hook LYNX's moving marks (ui/MotionOverlayX11.h) use to draw again over pixels JUCE|NL|// replaced: the window and the rectangles just blitted to it, in window pixels (cmake/LynxPatchJuce.cmake, fix 41)|NL|void (*lynxX11AfterBlitHook) (unsigned long window, const RectangleList<int>& blitted) = nullptr;|NL|void* lynxX11Display() { return XWindowSystem::getInstance()->getDisplay(); }|NL||NL|class LinuxComponentPeer final : public ComponentPeer,")
+        lynx_juce_fix("X11 blits told to LYNX: after a blit" "LYNX patch (round 190jx): the window's pixels"
+            "                for (auto& i : originalRepaintRegion)|NL|                   XWindowSystem::getInstance()->blitToWindow (peer.windowH, image, i, totalArea);|NL|"
+            "                for (auto& i : originalRepaintRegion)|NL|                   XWindowSystem::getInstance()->blitToWindow (peer.windowH, image, i, totalArea);|NL||NL|                // LYNX patch (round 190jx): the window's pixels there are new (fix 41)|NL|                if (lynxX11AfterBlitHook != nullptr)|NL|                    lynxX11AfterBlitHook ((unsigned long) peer.windowH, originalRepaintRegion);|NL|")
+        lynx_juce_fix("a minimised window covers nothing: on the screen" "LYNX patch (issue #188): on the screen"
+            "    bool contains (Point<int> localPos, bool trueIfInAChildWindow) const override|NL|    {|NL|"
+            "    // LYNX patch (issue #188): on the screen = mapped, viewable (its ancestors mapped too) and not minimised|NL|    bool lynxIsOnScreen() const|NL|    {|NL|        if (windowH == 0)|NL|            return false;|NL||NL|        {|NL|            XWindowSystemUtilities::ScopedXLock xLock;|NL|            XWindowAttributes atts;|NL||NL|            if (! X11Symbols::getInstance()->xGetWindowAttributes (XWindowSystem::getInstance()->getDisplay(), windowH, &atts)|NL|                || atts.map_state != IsViewable)|NL|                return false;|NL|        }|NL||NL|        return ! XWindowSystem::getInstance()->isMinimised (windowH);|NL|    }|NL||NL|    bool contains (Point<int> localPos, bool trueIfInAChildWindow) const override|NL|    {|NL|")
     elseif(file MATCHES "juce_Displays.cpp$")
         lynx_juce_fix("monitors that touch no other" "LYNX patch (issue #45): a monitor that touches"
             "        // All of the nodes should have a parent|NL|        jassert (node.parent != nullptr);|NL|"
@@ -368,6 +547,40 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("frame moved, not restacked" "LYNX patch (issue #45): a frame that moved"
             "    if (configure.window != peerHandle && isParentWindowOf (configure.window, peerHandle))|NL|        dismissBlockingModals (peer);"
             "    // LYNX patch (issue #45): a frame that moved, not a restack|NL|    if (configure.window != peerHandle && isParentWindowOf (configure.window, peerHandle) && lynxWindowMovedOrResized (configure))|NL|        dismissBlockingModals (peer);")
+
+        lynx_juce_fix("WM_PROTOCOLS atoms created (fix 50)" "LYNX patch (fix 50): created when missing"
+            "    protocols                    = getIfExists (display, \"WM_PROTOCOLS\");|NL|    protocolList [TAKE_FOCUS]    = getIfExists (display, \"WM_TAKE_FOCUS\");|NL|    protocolList [DELETE_WINDOW] = getIfExists (display, \"WM_DELETE_WINDOW\");|NL|    protocolList [PING]          = getIfExists (display, \"_NET_WM_PING\");|NL|"
+            "    // LYNX patch (fix 50): created when missing. On an X server no window manager ever ran on (a fresh Xvfb)|NL|    // these atoms don't exist yet, and every new window set its WM_PROTOCOLS property with atom 0: BadAtom, which ends|NL|    // a plugin's host (JUCE installs its X error handler only in a standalone app)|NL|    protocols                    = getCreating (display, \"WM_PROTOCOLS\");|NL|    protocolList [TAKE_FOCUS]    = getCreating (display, \"WM_TAKE_FOCUS\");|NL|    protocolList [DELETE_WINDOW] = getCreating (display, \"WM_DELETE_WINDOW\");|NL|    protocolList [PING]          = getCreating (display, \"_NET_WM_PING\");|NL|")
+
+        lynx_juce_fix("no WM_STATE read with atom 0 (fix 50)" "LYNX patch (fix 50): no WM_STATE atom"
+            "    XWindowSystemUtilities::ScopedXLock xLock;|NL|    XWindowSystemUtilities::GetXProperty prop (display, w, atoms.state, 0, 64, false, atoms.state);|NL|"
+            "    // LYNX patch (fix 50): no WM_STATE atom (no window manager ever ran), so no window has that property; asking with|NL|    // atom 0 was a BadAtom error|NL|    if (atoms.state == None)|NL|        return false;|NL||NL|    XWindowSystemUtilities::ScopedXLock xLock;|NL|    XWindowSystemUtilities::GetXProperty prop (display, w, atoms.state, 0, 64, false, atoms.state);|NL|")
+        lynx_juce_fix("no _NET_WM_STATE read with atom 0 (fix 50)" "LYNX patch (fix 50): no _NET_WM_STATE atom"
+            "    XWindowSystemUtilities::ScopedXLock xLock;|NL|    XWindowSystemUtilities::GetXProperty prop (display, w, atoms.windowState, 0, 128, false, XA_ATOM);|NL|"
+            "    // LYNX patch (fix 50): no _NET_WM_STATE atom (no EWMH window manager ever ran), so no window has that property|NL|    if (atoms.windowState == None)|NL|        return false;|NL||NL|    XWindowSystemUtilities::ScopedXLock xLock;|NL|    XWindowSystemUtilities::GetXProperty prop (display, w, atoms.windowState, 0, 128, false, XA_ATOM);|NL|")
+
+        lynx_juce_fix("horizontal wheel (buttons 6 / 7) (fix 49)" "LYNX patch (fix 49, issue #254)"
+            "    auto mapIndex = (uint32) (buttonPressEvent.button - Button1);|NL|"
+            "    // LYNX patch (fix 49, issue #254): buttons 6 / 7 are the horizontal wheel (a tilt wheel, a second wheel), left /|NL|    // right; JUCE dropped them. deltaX > 0 = left, as Windows' WM_MOUSEHWHEEL comes through JUCE|NL|    if (buttonPressEvent.button == 6 || buttonPressEvent.button == 7)|NL|    {|NL|        MouseWheelDetails wheel;|NL|        wheel.deltaX = buttonPressEvent.button == 6 ? 50.0f / 256.0f : -50.0f / 256.0f;|NL|        wheel.deltaY = 0.0f;|NL|        wheel.isReversed = false;|NL|        wheel.isSmooth = false;|NL|        wheel.isInertial = false;|NL||NL|        peer->handleMouseWheel (MouseInputSource::InputSourceType::mouse, getLogicalMousePos (buttonPressEvent, peer->getPlatformScaleFactor()),|NL|                                getEventTime (buttonPressEvent), wheel);|NL|        return;|NL|    }|NL||NL|    auto mapIndex = (uint32) (buttonPressEvent.button - Button1);|NL|")
+    elseif(file MATCHES "juce_audio_plugin_client_LV2.cpp$")
+        lynx_juce_fix("LV2: optional audio inputs may stay unconnected (fix 50)" "LYNX patch (fix 50): an input port"
+            "        for (auto i = 0, end = processor->getTotalNumInputChannels(); i < end; ++i)|NL|            audio.copyFrom (i, 0, ports.getBufferForAudioInput (i), audio.getNumSamples());|NL|"
+            "        // LYNX patch (fix 50): an input port the host left unconnected is silence. JUCE declares the ports of a bus that|NL|        // is off by default (a side chain) lv2:connectionOptional, so a host may connect them to NULL, and copying from|NL|        // there crashed (JUCE's own LV2 host does it for every channel its buffer doesn't have)|NL|        for (auto i = 0, end = processor->getTotalNumInputChannels(); i < end; ++i)|NL|        {|NL|            if (const auto* input = ports.getBufferForAudioInput (i))|NL|                audio.copyFrom (i, 0, input, audio.getNumSamples());|NL|            else|NL|                audio.clear (i, 0, audio.getNumSamples());|NL|        }|NL|")
+        lynx_juce_fix("LV2: parameter ranges as decimals (fix 50)" "LYNX patch (fix 50): decimals"
+            "            os << \"\\\\tlv2:default \" << defaultValue << \" ;\\\\n\"|NL|                  \"\\\\tlv2:minimum \" << min << \" ;\\\\n\"|NL|                  \"\\\\tlv2:maximum \" << max;|NL|"
+            "            // LYNX patch (fix 50): decimals (\"0.0\", not \"0\": an integer literal is no atom:Float; lv2lint failed every|NL|            // parameter on it)|NL|            const auto lynxDecimal = [] (float v) { const String text (v); return text.containsAnyOf (\".eE\") ? text : text + \".0\"; };|NL||NL|            os << \"\\\\tlv2:default \" << lynxDecimal (defaultValue) << \" ;\\\\n\"|NL|                  \"\\\\tlv2:minimum \" << lynxDecimal (min) << \" ;\\\\n\"|NL|                  \"\\\\tlv2:maximum \" << lynxDecimal (max);|NL|")
+        lynx_juce_fix("LV2: scale points as decimals (fix 50)" "LYNX patch (fix 50): a decimal"
+            "                          \"\\\\t\\\\trdf:value \" << value << \" ;\\\\n\"|NL|"
+            "                          \"\\\\t\\\\trdf:value \" << lynxDecimal (value) << \" ;\\\\n\" // LYNX patch (fix 50): a decimal|NL|")
+        lynx_juce_fix("LV2: the effect's plugin class (fix 50)" "LYNX patch (fix 50): the effect's class"
+            "             #else|NL|              \"lv2:Plugin\"|NL|             #endif|NL|"
+            "             #elif defined (JucePlugin_LV2Class) // LYNX patch (fix 50): the effect's class (lv2:EQPlugin, ...)|NL|              JucePlugin_LV2Class|NL|             #else|NL|              \"lv2:Plugin\"|NL|             #endif|NL|")
+        lynx_juce_fix("LV2: the plugin's licence in its .ttl (fix 51)" "LYNX patch (fix 51): the licence"
+            "              \"\\\\tlv2:minorVersion \" << minorVersion << \" ;\\\\n\"|NL|"
+            "              \"\\\\tdoap:license <http://spdx.org/licenses/AGPL-3.0-or-later> ;\\\\n\" // LYNX patch (fix 51): the licence (LYNX's plugins are AGPL-3.0-or-later)|NL|              \"\\\\tlv2:minorVersion \" << minorVersion << \" ;\\\\n\"|NL|")
+        lynx_juce_fix("LV2: unconnected outputs while suspended (fix 50)" "LYNX patch (fix 50): an output port"
+            "                    const auto ptr = ports.getBufferForAudioOutput (i);|NL|                    std::fill (ptr, ptr + numSteps, 0.0f);|NL|"
+            "                    const auto ptr = ports.getBufferForAudioOutput (i);|NL||NL|                    if (ptr != nullptr) // LYNX patch (fix 50): an output port the host left unconnected|NL|                        std::fill (ptr, ptr + numSteps, 0.0f);|NL|")
     elseif(file MATCHES "juce_CoreGraphicsContext_mac.mm$")
         lynx_juce_fix("no gradient flood from an empty path" "LYNX patch (issue #11): an empty path"
             "        CGContextReplacePathWithStrokedPath (context.get());|NL||NL|    ScopedCGContextState scopedState (context.get());"
@@ -376,6 +589,38 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("clip to an empty path" "LYNX patch (issue #11): clipping to an empty path"
             "void CoreGraphicsContext::clipToPath (const Path& path, const AffineTransform& transform)|NL|{|NL|    createPath (path, transform);|NL|"
             "void CoreGraphicsContext::clipToPath (const Path& path, const AffineTransform& transform)|NL|{|NL|    createPath (path, transform);|NL||NL|    // LYNX patch (issue #11): clipping to an empty path leaves nothing (Quartz would ignore it)|NL|    if (CGContextIsPathEmpty (context.get()))|NL|    {|NL|        CGContextClipToRect (context.get(), CGRectZero);|NL|        lastClipRect.reset();|NL|        return;|NL|    }|NL|")
+    elseif(file MATCHES "juce_RenderingHelpers.h$")
+        lynx_juce_fix("path edge tables over the path's own rows (fix 45)" "LYNX patch (round 190ms, fix 45): the edge table over the clip's rows"
+            "            if (path.getBoundsTransformed (trans).getSmallestIntegerContainer().intersects (clipRect))|NL|                fillShape (*new EdgeTableRegionType (clipRect, path, trans), false);"
+            "            // LYNX patch (round 190ms, fix 45): the edge table over the clip's rows from one above the path's to one below|NL|            // (all its columns), not over every row of the clip (a row per pixel row of the clip for every shape); the|NL|            // same pixels (cmake/LynxPatchJuce.cmake)|NL|            const auto lynxPathArea = path.getBoundsTransformed (trans).getSmallestIntegerContainer();|NL||NL|            if (lynxPathArea.intersects (clipRect))|NL|            {|NL|                const auto lynxNear = [] (int v) { return v > -0x1000000 && v < 0x1000000; };|NL|                const auto lynxArea = lynxNear (lynxPathArea.getY()) && lynxNear (lynxPathArea.getBottom())|NL|                                          ? Rectangle<int>::leftTopRightBottom (clipRect.getX(), jmax (clipRect.getY(), lynxPathArea.getY() - 1),|NL|                                                                                clipRect.getRight(), jmin (clipRect.getBottom(), lynxPathArea.getBottom() + 1))|NL|                                          : clipRect;|NL|                fillShape (*new EdgeTableRegionType (lynxArea, path, trans), false);|NL|            }")
+        lynx_juce_fix("RGB rows into ARGB images (fix 45)" "LYNX patch (round 190ms, fix 45): an RGB row"
+            "            else|NL|            {|NL|                do|NL|                {|NL|                    dest->blend (*src);|NL|                    dest = addBytesToPointer (dest, destStride);|NL|                    src  = addBytesToPointer (src, srcStride);|NL|                } while (--width > 0);|NL|            }"
+            "            else|NL|            {|NL|               #if JUCE_LITTLE_ENDIAN && ! JUCE_ANDROID|NL|                // LYNX patch (round 190ms, fix 45): an RGB row into an ARGB one, as PixelARGB::blend (PixelRGB) = set does it|NL|                // (0xff000000 | r << 16 | g << 8 | b), one 4-byte load per pixel (cmake/LynxPatchJuce.cmake)|NL|                if constexpr (std::is_same_v<DestPixelType, PixelARGB> && std::is_same_v<SrcPixelType, PixelRGB>|NL|                              && PixelRGB::indexB == 0 && PixelRGB::indexG == 1 && PixelRGB::indexR == 2)|NL|                {|NL|                    if (destStride == 4 && srcStride == 3 && width > 0)|NL|                    {|NL|                        auto* d = reinterpret_cast<uint8*> (dest);|NL|                        auto* s = reinterpret_cast<const uint8*> (src);|NL||NL|                        for (int i = 0; i < width - 1; ++i)|NL|                        {|NL|                            uint32 v;|NL|                            memcpy (&v, s + 3 * i, 4);|NL|                            v |= 0xff000000u;|NL|                            memcpy (d + 4 * i, &v, 4);|NL|                        }|NL||NL|                        const auto* last = s + 3 * (width - 1); // (its fourth byte would be past the row)|NL|                        const auto v = 0xff000000u | (uint32) last[0] | ((uint32) last[1] << 8) | ((uint32) last[2] << 16);|NL|                        memcpy (d + 4 * (width - 1), &v, 4);|NL|                        return;|NL|                    }|NL|                }|NL|               #endif|NL||NL|                do|NL|                {|NL|                    dest->blend (*src);|NL|                    dest = addBytesToPointer (dest, destStride);|NL|                    src  = addBytesToPointer (src, srcStride);|NL|                } while (--width > 0);|NL|            }")
+        lynx_juce_fix("glyph cache keys found by a hash of the font (fix 46)" "LYNX patch (round 190ms, fix 46): a hash"
+            "        return cache.get (Key { font, glyphNumber }, [] (const auto& key)"
+            "        return cache.get (Key { font, glyphNumber, Key::hashOf (font) }, [] (const auto& key)")
+        lynx_juce_fix("glyph cache key order (fix 46)" "LYNX patch (round 190ms, fix 46): the glyph, a hash"
+            "    struct Key|NL|    {|NL|        Font font;|NL|        int glyph;|NL||NL|        bool operator< (const Key& other) const|NL|        {|NL|            if (glyph < other.glyph)|NL|                return true;|NL||NL|            if (other.glyph < glyph)|NL|                return false;|NL||NL|            return GraphicsFontHelpers::compareFont (font, other.font);|NL|        }|NL|    };"
+            "    struct Key|NL|    {|NL|        Font font;|NL|        int glyph;|NL|        uint64 fontHash; // LYNX patch (round 190ms, fix 46): a hash of what tells fonts apart, see operator<|NL||NL|        static uint64 hashOf (const Font& f)|NL|        {|NL|            const auto bits = [] (float v) { uint32 b; memcpy (&b, &v, sizeof (b)); return (uint64) b; };|NL|            auto h = (uint64) f.getTypefaceName().hashCode64();|NL|            h = (h ^ (uint64) f.getTypefaceStyle().hashCode64()) * 0x100000001b3ull;|NL|            h = (h ^ bits (f.getHeight())) * 0x100000001b3ull;|NL|            return (h ^ bits (f.getHorizontalScale())) * 0x100000001b3ull;|NL|        }|NL||NL|        // LYNX patch (round 190ms, fix 46): the glyph, a hash of the font's name, style, height and width, then|NL|        // the font itself (a strict weak order whose equal keys are JUCE's equal keys). JUCE compared whole FontOptions|NL|        // (strings first) at every node of the same glyph: ~1000 instructions each, ~5 per look-up, 12 % of a frame.|NL|        bool operator< (const Key& other) const|NL|        {|NL|            if (glyph != other.glyph)|NL|                return glyph < other.glyph;|NL||NL|            if (fontHash != other.fontHash)|NL|                return fontHash < other.fontHash;|NL||NL|            if (font == other.font) // (the same shared font, or equal options: equal keys)|NL|                return false;|NL||NL|            return GraphicsFontHelpers::compareFont (font, other.font);|NL|        }|NL|    };")
+        lynx_juce_fix("software glyph cache of 1024 (fix 46)" "LYNX patch (round 190ms, fix 46): 1024 glyphs"
+            "    LruCache<Key, std::vector<GlyphLayer>> cache;|NL|    CriticalSection lock;"
+            "    // LYNX patch (round 190ms, fix 46): 1024 glyphs (LruCache's default 128 is fewer than one busy window|NL|    // shows, so a whole repaint evicted and rebuilt its own glyphs; cmake/LynxPatchJuce.cmake)|NL|    LruCache<Key, std::vector<GlyphLayer>, 1024> cache;|NL|    CriticalSection lock;")
+    elseif(file MATCHES "juce_GraphicsContext.cpp$")
+        lynx_juce_fix("text arrangement caches of 1024 (fix 46)" "LYNX patch (round 190ms, fix 46): 1024 shaped lines"
+            "        LruCache<ArrangementArgs, ConfiguredArrangement> cache;"
+            "        // LYNX patch (round 190ms, fix 46): 1024 shaped lines, not LruCache's default 128 (a busy window shows|NL|        // more labels than that and shaped them all again every whole repaint; cmake/LynxPatchJuce.cmake)|NL|        LruCache<ArrangementArgs, ConfiguredArrangement, 1024> cache;")
+        lynx_juce_fix("drawSingleLineText's key holds its flags (fix 46)" "LYNX patch (round 190ms, fix 46): the flags"
+            "        auto tie() const noexcept { return std::tie (font, text, startX, baselineY); }"
+            "        // LYNX patch (round 190ms, fix 46): the flags are part of the line; the cheap fields first, the font|NL|        // last (cmake/LynxPatchJuce.cmake)|NL|        auto tie() const noexcept { return std::tie (startX, baselineY, flags, text, font); }")
+        lynx_juce_fix("drawMultiLineText's key, cheap fields first (fix 46)" "LYNX patch (round 190ms, fix 46): key order, multi-line text"
+            "        auto tie() const noexcept { return std::tie (font, text, startX, baselineY, maximumLineWidth, justification, leading); }"
+            "        // LYNX patch (round 190ms, fix 46): key order, multi-line text: the cheap fields first, the font last|NL|        auto tie() const noexcept { return std::tie (startX, baselineY, maximumLineWidth, justification, leading, text, font); }")
+        lynx_juce_fix("drawText's key, cheap fields first (fix 46)" "LYNX patch (round 190ms, fix 46): key order, drawText"
+            "        auto tie() const noexcept { return std::tie (font, text, area, justificationType, useEllipsesIfTooBig); }"
+            "        // LYNX patch (round 190ms, fix 46): key order, drawText: the cheap fields first, the font last|NL|        auto tie() const noexcept { return std::tie (area, justificationType, useEllipsesIfTooBig, text, font); }")
+        lynx_juce_fix("drawFittedText's key, cheap fields first (fix 46)" "LYNX patch (round 190ms, fix 46): key order, drawFittedText"
+            "        auto tie() const noexcept { return std::tie (font, text, area, justification, maximumNumberOfLines, minimumHorizontalScale); }"
+            "        // LYNX patch (round 190ms, fix 46): key order, drawFittedText: the cheap fields first, the font last|NL|        auto tie() const noexcept { return std::tie (area, justification, maximumNumberOfLines, minimumHorizontalScale, text, font); }")
     elseif(file MATCHES "juce_SimpleShapedText.cpp$")
         lynx_juce_fix("no walk back over no glyphs" "LYNX patch (issue #142): no glyphs"
             "                        auto it = glyphs.cend();|NL||NL|                        while (--it != glyphs.begin())"
@@ -447,6 +692,15 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("VST3 MIDI-mapped parameter reaches the editor" "LYNX patch (issue #152): the editor and the host follow"
             "                    queue->append ({ (Steinberg::int32) time, (float) paramValue });|NL|"
             "                    queue->append ({ (Steinberg::int32) time, (float) paramValue });|NL||NL|                // LYNX patch (issue #152): the editor and the host follow the mapped change (the SDK leaves it to the|NL|                // host: the plugin's knob stayed still while its sound changed, e.g. Arturia's MIDI-learned controls)|NL|                if (auto* lynxParam = getParameterForID ((Vst::ParamID) controlID))|NL|                    lynxParam->lynxFollowMidiMapping ((float) paramValue);|NL|")
+        lynx_juce_fix("VST3 sample-accurate automation: the VST3 index" "LYNX patch (round 190jg, fix 39): the parameter's VST3 index"
+            "        void setValueWithoutUpdatingProcessor (float newValue)|NL|"
+            "        // LYNX patch (round 190jg, fix 39): the parameter's VST3 index (timed changes in processAudio)|NL|        Steinberg::int32 lynxVstIndex() const noexcept { return vstParamIndex; }|NL||NL|        void setValueWithoutUpdatingProcessor (float newValue)|NL|")
+        lynx_juce_fix("VST3 sample-accurate automation" "LYNX patch (round 190jg, fix 39): the automation's changes inside"
+            "        cachedParamValues.ifSet ([&] (Steinberg::int32 index, float value)|NL|        {|NL|            inputParameterChanges->set (cachedParamValues.getParamID (index), value, 0);|NL|        });|NL|"
+            "        cachedParamValues.ifSet ([&] (Steinberg::int32 index, float value)|NL|        {|NL|            inputParameterChanges->set (cachedParamValues.getParamID (index), value, 0);|NL|        });|NL||NL|        // LYNX patch (round 190jg, fix 39): the automation's changes inside this block, at their sample offsets (LYNX's|NL|        // engine/TimedParameters.h; indices as getParameters()). The last one is the parameter's value afterwards.|NL|        for (int k = 0; k < lynxTimedParamCount; ++k)|NL|        {|NL|            const auto& list = getParameters();|NL|            const auto index = lynxTimedParamIndices[k];|NL|            if (! isPositiveAndBelow (index, list.size()))|NL|                continue;|NL|            if (auto* p = dynamic_cast<VST3Parameter*> (list[index]))|NL|            {|NL|                const auto value = jlimit (0.0f, 1.0f, lynxTimedParamValues[k]);|NL|                inputParameterChanges->set (cachedParamValues.getParamID (p->lynxVstIndex()), value, jlimit (0, numSamples - 1, lynxTimedParamOffsets[k]));|NL|                cachedParamValues.exchangeWithoutNotifying (p->lynxVstIndex(), value);|NL|                parameterDispatcher.push (p->lynxVstIndex(), value);|NL|            }|NL|        }|NL|")
+        lynx_juce_fix("VST3 editor size: Scale editor dimensions (fix 47)" "LYNX patch (round 190oh, fix 47): FL's"
+            "        const auto combinedScale = nativeScaleFactor * getDesktopScaleFactor();"
+            "        // LYNX patch (round 190oh, fix 47): FL's wrapper \"Scale editor dimensions\" (or a DPI-unaware window): the|NL|        // plugin's reported size is taken in logical pixels (src/platform/NativeEmbed.h, setEditorScaling)|NL|        const auto combinedScale = ((bool) getProperties()[\"lynxScaleEditorDimensions\"] ? 1.0f : nativeScaleFactor) * getDesktopScaleFactor();")
     elseif(file MATCHES "juce_Windowing_windows.cpp$")
         lynx_juce_fix("layered child window keeps its place when repainted" "LYNX patch (round 190cj): a child window's position"
             "        UpdateLayeredWindow (hwnd, nullptr, &pos, &size, sourceHdc, &p, 0, &bf, ULW_ALPHA);"
@@ -508,7 +762,22 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("child window frames shown: after a frame" "LYNX patch (round 190gv, fix 34): a child window's frame"
             "        if (auto* ctx = direct2DContext->startFrame ((float) peer.getPlatformScaleFactor()))|NL|        {|NL|            peer.handlePaint (*ctx);|NL|            direct2DContext->endFrame();|NL|        }"
             "        if (auto* ctx = direct2DContext->startFrame ((float) peer.getPlatformScaleFactor()))|NL|        {|NL|            peer.handlePaint (*ctx);|NL|            direct2DContext->endFrame();|NL|            peer.lynxFramePresented(); // LYNX patch (round 190gv, fix 34): a child window's frame is shown at once|NL|        }")
+    elseif(file MATCHES "juce_WaitableEvent.cpp$")
+        lynx_juce_fix("timed waits without the sub-millisecond spin (fix 44)" "LYNX patch (round 190la, fix 44): libc++ on Windows"
+            "            if (! condition.wait_for (lock, std::chrono::duration<double, std::milli> { timeOutMilliseconds },|NL|                                      [this] { return triggered == true; }))|NL|            {|NL|                return false;|NL|            }"
+            "           #if JUCE_WINDOWS && defined (_LIBCPP_VERSION)|NL|            // LYNX patch (round 190la, fix 44): libc++ on Windows hands SleepConditionVariableSRW the time left truncated to whole|NL|            // milliseconds, so under 1 ms left it does not sleep and wait_for spins until the deadline: the last part of|NL|            // every timed wait (the JUCE timer thread: ~4 % of a core at rest). Whole milliseconds, rounded up, instead.|NL|            const auto lynxEnd = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration> (std::chrono::duration<double, std::milli> { timeOutMilliseconds });|NL||NL|            while (! triggered)|NL|            {|NL|                const auto lynxLeft = lynxEnd - std::chrono::steady_clock::now();|NL||NL|                if (lynxLeft <= std::chrono::steady_clock::duration::zero())|NL|                    return false;|NL||NL|                const auto lynxMs = std::chrono::ceil<std::chrono::milliseconds> (lynxLeft).count();|NL|                SleepConditionVariableSRW (reinterpret_cast<PCONDITION_VARIABLE> (condition.native_handle()),|NL|                                           reinterpret_cast<PSRWLOCK> (mutex.native_handle()),|NL|                                           (DWORD) jlimit<decltype (lynxMs)> (1, 0x7ffffffe, lynxMs), 0);|NL|            }|NL|           #else|NL|            if (! condition.wait_for (lock, std::chrono::duration<double, std::milli> { timeOutMilliseconds },|NL|                                      [this] { return triggered == true; }))|NL|            {|NL|                return false;|NL|            }|NL|           #endif")
     elseif(file MATCHES "juce_DirectX_windows.h$")
+        lynx_juce_fix("no driver threads for the Direct2D device (fix 43)" "LYNX patch (round 190la, fix 43): no driver threads"
+            "        const auto creationFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;"
+            "        // LYNX patch (round 190la, fix 43): LYNX_D3D_DRIVER_THREADS=0: no driver threads for these frames (A/B; default as before)|NL|        const auto creationFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT|NL|                                   | (SystemStats::getEnvironmentVariable (\"LYNX_D3D_DRIVER_THREADS\", {}) == \"0\" ? D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS : 0);")
+        lynx_juce_fix("no driver threads with 4 CPUs or fewer (fix 48)" "lynxNoDriverThreads() ? D3D11_CREATE_DEVICE"
+            "                                   | (SystemStats::getEnvironmentVariable (\"LYNX_D3D_DRIVER_THREADS\", {}) == \"0\" ? D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS : 0);"
+            "                                   | (lynxNoDriverThreads() ? D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS : 0);"
+        )
+        lynx_juce_fix("no driver threads with 4 CPUs or fewer, the rule (fix 48)" "LYNX patch (round 190os, fix 48, on fix 43): the rule"
+            "    static Ptr create (ComSmartPtr<ID2D1Factory2> d2dFactory, ComSmartPtr<IDXGIAdapter1> dxgiAdapterIn)|NL|    {"
+            "    // LYNX patch (round 190os, fix 48, on fix 43): the rule. The graphics driver's own threads (NVIDIA's \"threaded optimization\")|NL|    // take the frames' commands off the message thread, which then waits for them at the present; with 4 logical CPUs|NL|    // or fewer for LYNX they compete with the audio threads, and a frame waited 100-250 ms behind them while a song|NL|    // overloaded a 2-CPU PC (round 190os). There the message thread does that work itself. LYNX_D3D_DRIVER_THREADS=1:|NL|    // always the driver's threads; =0: never (fix 43's A/B switch). More CPUs: as JUCE does.|NL|    static bool lynxNoDriverThreads()|NL|    {|NL|        const auto choice = SystemStats::getEnvironmentVariable (\"LYNX_D3D_DRIVER_THREADS\", {});|NL||NL|        if (choice == \"0\" || choice == \"1\")|NL|            return choice == \"0\";|NL||NL|        DWORD_PTR process = 0, system = 0;|NL||NL|        if (! GetProcessAffinityMask (GetCurrentProcess(), &process, &system))|NL|            return false;|NL||NL|        int cpus = 0;|NL||NL|        for (auto mask = process; mask != 0; mask &= mask - 1)|NL|            ++cpus;|NL||NL|        return cpus > 0 && cpus <= 4;|NL|    }|NL||NL|    static Ptr create (ComSmartPtr<ID2D1Factory2> d2dFactory, ComSmartPtr<IDXGIAdapter1> dxgiAdapterIn)|NL|    {"
+        )
         lynx_juce_fix("no WARP device beside a hardware adapter" "LYNX patch (round 190go): a software adapter"
             "        for (UINT i = 0;; ++i)|NL|        {|NL|            ComSmartPtr<IDXGIAdapter1> dxgiAdapter;|NL||NL|            if (factory->EnumAdapters1 (i, dxgiAdapter.resetAndGetPointerAddress()) == DXGI_ERROR_NOT_FOUND)|NL|                break;|NL||NL|            if (const auto adapter = DxgiAdapter::create (d2dFactory, dxgiAdapter))|NL|            {|NL|                adapterArray.add (adapter);|NL|                listeners.call ([adapter] (DxgiAdapterListener& l) { l.adapterCreated (adapter); });|NL|            }|NL|        }|NL|"
             "        // LYNX patch (round 190go): a software adapter (WARP, the \"Microsoft Basic Render Driver\") gets its devices only|NL|        // when no hardware adapter gave any; before, every adapter got a Direct3D 11 + Direct2D device at start-up|NL|        std::vector<ComSmartPtr<IDXGIAdapter1>> lynxSoftwareAdapters;|NL|        const auto lynxAdd = [this] (ComSmartPtr<IDXGIAdapter1> dxgiAdapter)|NL|        {|NL|            if (const auto adapter = DxgiAdapter::create (d2dFactory, dxgiAdapter))|NL|            {|NL|                adapterArray.add (adapter);|NL|                listeners.call ([adapter] (DxgiAdapterListener& l) { l.adapterCreated (adapter); });|NL|            }|NL|        };|NL||NL|        for (UINT i = 0;; ++i)|NL|        {|NL|            ComSmartPtr<IDXGIAdapter1> dxgiAdapter;|NL||NL|            if (factory->EnumAdapters1 (i, dxgiAdapter.resetAndGetPointerAddress()) == DXGI_ERROR_NOT_FOUND)|NL|                break;|NL||NL|            DXGI_ADAPTER_DESC1 lynxDesc {};|NL||NL|            if (dxgiAdapter != nullptr && SUCCEEDED (dxgiAdapter->GetDesc1 (&lynxDesc))|NL|                && ((lynxDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || (lynxDesc.VendorId == 0x1414 && lynxDesc.DeviceId == 0x8c)))|NL|            {|NL|                lynxSoftwareAdapters.push_back (dxgiAdapter);|NL|                continue;|NL|            }|NL||NL|            lynxAdd (dxgiAdapter);|NL|        }|NL||NL|        if (adapterArray.isEmpty())|NL|            for (auto& dxgiAdapter : lynxSoftwareAdapters)|NL|                lynxAdd (dxgiAdapter);|NL|")
@@ -551,6 +820,9 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("VST3 note tags: storage" "LYNX patch (round 190fg): the LYNX note each id belongs to"
             "    struct LynxKey|NL|    {|NL|        std::array<Steinberg::int32, 4> ids {};|NL|        int count = 0;|NL|    };"
             "    struct LynxKey|NL|    {|NL|        std::array<Steinberg::int32, 4> ids {};|NL|        std::array<unsigned int, 4> tags {}; // LYNX patch (round 190fg): the LYNX note each id belongs to (0: none)|NL|        int count = 0;|NL|    };|NL||NL|    // LYNX patch (round 190fg): which LYNX note a converted note on / off belongs to (0 when LYNX has not set the hook)|NL|    static unsigned int lynxNoteTag (bool noteOn, int channel, int key) noexcept|NL|    {|NL|        return lynxNoteTagHook != nullptr && lynxNoteTuningContext != nullptr ? lynxNoteTagHook (lynxNoteTuningContext, noteOn, channel, key) : 0u;|NL|    }")
+        lynx_juce_fix("VST3 sample-accurate automation: declarations" "LYNX patch (round 190jg, fix 39): timed parameter changes"
+            "inline unsigned int (*lynxNoteTagHook) (void* context, bool noteOn, int channel, int key) = nullptr;"
+            "inline unsigned int (*lynxNoteTagHook) (void* context, bool noteOn, int channel, int key) = nullptr;|NL|// LYNX patch (round 190jg, fix 39): timed parameter changes for the block running on this thread (LYNX's|NL|// engine/TimedParameters.h has the same four declarations: keep them identical). juce_VST3PluginFormat.cpp adds them to|NL|// the block's parameter queues at their sample offsets.|NL|inline thread_local int lynxTimedParamCount = 0;|NL|inline thread_local const int* lynxTimedParamIndices = nullptr;|NL|inline thread_local const int* lynxTimedParamOffsets = nullptr;|NL|inline thread_local const float* lynxTimedParamValues = nullptr;")
     elseif(file MATCHES "juce_VBlank_windows.cpp$")
         lynx_juce_fix("vertical blanks only while needed: demands" "LYNX patch (round 190gv): a window listens to the vertical blanks only while"
             "namespace juce|NL|{|NL||NL|class VBlankThread : private Thread,"
@@ -586,6 +858,10 @@ function(lynx_patch_juce_file file)
         lynx_juce_fix("vertical blanks only while needed: attachment joins" "LYNX patch (round 190gv): the window's vertical blanks start"
             "            peer->addVBlankListener (this);|NL|"
             "            peer->addVBlankListener (this);|NL|           #if JUCE_WINDOWS|NL|            lynxVBlankListenerAdded (*peer); // LYNX patch (round 190gv): the window's vertical blanks start again|NL|           #endif|NL|")
+    elseif(file MATCHES "juce_Messaging_linux.cpp$")
+        lynx_juce_fix("unregistered descriptor callbacks are not called (fix 52)" "LYNX patch (fix 52)"
+            "        // CriticalSection should be available during the callback|NL|        for (auto& fn : callbackStorage)|NL|            (*fn)();|NL||NL|        return ! callbackStorage.empty();|NL|    }"
+            "        // CriticalSection should be available during the callback|NL|        for (auto& fn : callbackStorage)|NL|        {|NL|            // LYNX patch (fix 52): an earlier callback of this round may have unregistered this one, and its owner may|NL|            // be gone (a VST3 plugin's run loop, deleted with the plugin's last editor): only a callback still|NL|            // registered is called|NL|            if (! lynxStillRegistered (fn))|NL|                continue;|NL||NL|            (*fn)();|NL|        }|NL||NL|        return ! callbackStorage.empty();|NL|    }|NL||NL|    bool lynxStillRegistered (const std::shared_ptr<std::function<void()>>& fn) const|NL|    {|NL|        const ScopedLock sl (lock);|NL||NL|        for (const auto& registered : callbacks)|NL|            if (registered.second == fn)|NL|                return true;|NL||NL|        return false;|NL|    }")
     elseif(file MATCHES "juce_Direct2DHwndContext_windows.cpp$")
         lynx_juce_fix("Direct2D present pacing: declarations" "LYNX patch (round 190gv, fix 33): JUCE 8.0.4 paced"
             "namespace juce|NL|{|NL||NL|struct Direct2DHwndContext::HwndPimpl : public Direct2DGraphicsContext::Pimpl|NL|{"
@@ -642,15 +918,20 @@ function(lynx_patch_juce juce_dir)
     lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/windows/juce_ComponentPeer.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/mouse/juce_DragAndDropContainer.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/menus/juce_PopupMenu.cpp")
+    lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/widgets/juce_ListBox.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/native/juce_Windowing_linux.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/desktop/juce_Displays.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/native/juce_XWindowSystem_linux.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_graphics/native/juce_CoreGraphicsContext_mac.mm")
     lynx_patch_juce_file("${juce_dir}/modules/juce_graphics/native/juce_Direct2DImage_windows.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_graphics/fonts/juce_SimpleShapedText.cpp")
+    lynx_patch_juce_file("${juce_dir}/modules/juce_graphics/native/juce_RenderingHelpers.h")
+    lynx_patch_juce_file("${juce_dir}/modules/juce_graphics/contexts/juce_GraphicsContext.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_audio_processors/format_types/juce_VST3Common.h")
     lynx_patch_juce_file("${juce_dir}/modules/juce_audio_processors/format_types/juce_VST3PluginFormat.cpp")
     lynx_patch_juce_file("${juce_dir}/modules/juce_events/native/juce_Messaging_windows.cpp")
+    lynx_patch_juce_file("${juce_dir}/modules/juce_events/native/juce_Messaging_linux.cpp")
+    lynx_patch_juce_file("${juce_dir}/modules/juce_audio_plugin_client/juce_audio_plugin_client_LV2.cpp")
     # (Windows only, so a Linux or macOS configure never rewrites it in a JUCE checkout that others share)
     if(WIN32 OR CMAKE_SCRIPT_MODE_FILE)
         lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/native/juce_FileChooser_windows.cpp")
@@ -658,6 +939,7 @@ function(lynx_patch_juce juce_dir)
         lynx_patch_juce_file("${juce_dir}/modules/juce_audio_devices/native/juce_WASAPI_windows.cpp")
         lynx_patch_juce_file("${juce_dir}/modules/juce_audio_devices/native/juce_ASIO_windows.cpp")
         lynx_patch_juce_file("${juce_dir}/modules/juce_graphics/native/juce_DirectX_windows.h")
+        lynx_patch_juce_file("${juce_dir}/modules/juce_core/threads/juce_WaitableEvent.cpp")
         lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/juce_gui_basics.cpp")
         lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/native/juce_VBlank_windows.cpp")
         lynx_patch_juce_file("${juce_dir}/modules/juce_gui_basics/windows/juce_VBlankAttachment.cpp")

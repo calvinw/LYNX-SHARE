@@ -19,6 +19,19 @@ const std::array<std::uint32_t, 12>& lynxPalette();
 // A palette colour different from `current`, chosen from `seed` (any integer, e.g. a counter or time).
 std::uint32_t randomPaletteColour (std::uint32_t current, std::uint32_t seed);
 
+// FL's Channel rack "Restretch all" (round 190mp, DE-38; REA FUN_00fe7510 stretches every channel stretched offline
+// again): the channels LYNX plays a copy stretched ahead of time for (a sampler / audio clip with pitch kept and a length
+// in beats). Their count: 0 = the menu item is greyed.
+inline int restretchableChannels (const Song& song) noexcept
+{
+    int count = 0;
+    for (const auto& c : song.channels)
+        if ((c.instrument == InstrumentKind::sampler || c.instrument == InstrumentKind::audioClip) && ! c.samplePath.empty()
+            && c.sampler.keepPitch && c.sampler.stretchBeats > 0.0f)
+            ++count;
+    return count;
+}
+
 // --- patterns ----------------------------------------------------------------------------------
 
 // True when the pattern has no notes (its name and colour don't count).
@@ -67,6 +80,8 @@ struct Wheel
 // on ([SHOT] round 170a: a drag up from "Pattern 1" made "Pattern 769"). LYNX creates at most one: stepping forward
 // from the last pattern appends a new empty one unless the last one is already empty. Returns the index to select.
 int stepPatternCreating (Song& song, int delta);
+// Whether stepPatternCreating would append a new pattern (round 190ne: counted over the patterns the selector lists).
+bool stepCreatesPattern (const Song& song, int delta) noexcept;
 
 // The first empty pattern after `from` (wrapping around, never `from` itself); -1 if there is none.
 int findNextEmptyPattern (const Song& song, int from) noexcept;
@@ -166,6 +181,19 @@ void setStepRhythm (Pattern& pattern, int channel, const std::vector<bool>& rhyt
 // with a set length makes the pattern long enough for it, rounded up to whole bars of `barTicks`. An automatic length
 // (0) follows the notes by itself and stays 0.
 std::int64_t lengthWithStep (std::int64_t lengthTicks, int step, std::int64_t ticksPerStep, std::int64_t barTicks) noexcept;
+
+// Hotfix 0.1.31.2 (round 190ra; sidthenugget, Discord): the same rule for notes. Where the notes of `pattern` end: the
+// latest note end (a note counts at least one tick), automation clip notes too; 0 without notes.
+std::int64_t notesEnd (const Pattern& pattern) noexcept;
+// An edit (the Piano roll's: a drawn, pasted, moved or stretched note) left the notes ending at `pattern`'s notesEnd()
+// where they ended at `endBefore`: when that took them past a set length (lengthTicks > 0), the length grows to whole
+// bars of `barTicks` that hold them, as a step past it does (lengthWithStep). An automatic length (0) already follows
+// the notes and stays 0; a length FL set with its "Pattern length" marker stays (FL's own); notes already past the length
+// before the edit, and not taken further, leave it alone, except in a track clip (LYNX's own: any edit grows it, so a
+// clip made with 0.1.31 / 0.1.31.1 whose notes already went past its bar is mended by the next edit). A track clip (round 190ne) starts with a set length of one bar:
+// with "Stretched pattern clips loop their pattern" on, its clip looped that bar and every note drawn after it went
+// unheard. True when the length grew.
+bool growSetLengthToNotes (Pattern& pattern, std::int64_t endBefore, std::int64_t barTicks) noexcept;
 
 // Moves every note of `channel` by `delta` steps, wrapping inside the first `steps` steps.
 void rotateSteps (Pattern& pattern, int channel, int delta, int steps);

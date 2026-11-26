@@ -1,4 +1,6 @@
 #include "core/Scheduler.h"
+#include "core/ChordLane.h"
+#include "core/NoteRepeat.h"
 #include "core/ClipEnvelope.h"
 
 #include "core/ClipOps.h"
@@ -97,6 +99,69 @@ const ChannelDef* channelOf (const std::vector<ChannelDef>* channels, int channe
 {
     return channels != nullptr && channel >= 0 && channel < (int) channels->size() ? &(*channels)[(std::size_t) channel] : nullptr;
 }
+
+// MPE stage 2 (issue #108, core/NoteCurves.h): the note's expression `rel` ticks into it, as the voice takes it — the
+// note's own cents (fine pitch + its pitch curve), Mod X (its timbre curve, else its Mod X) and Mod Y (0.5 + pressure / 2
+// from its pressure curve, else its Mod Y)
+struct CurveValues
+{
+    float cents, modX, modY;
+};
+CurveValues curveValuesAt (const Note& note, double rel) noexcept
+{
+    const auto& c = *note.curves;
+    const auto& pressure = c.lane (NoteCurveLane::pressure);
+    return { note.finePitch + c.valueAt (NoteCurveLane::pitch, rel, 0.0f), c.valueAt (NoteCurveLane::timbre, rel, note.modX),
+             pressure.empty() ? note.modY : 0.5f + 0.5f * c.valueAt (NoteCurveLane::pressure, rel, 0.0f) };
+}
+
+// The voice property changes of a note with moving curves while it sounds in the block: one per moving lane at every
+// `step`-th sample of the song's sample grid (64 samples, coarser in long blocks so a block holds at most 16 per lane),
+// after the note's first sample and before its last. Live voice properties (NoteEvent::expression) that the renderer
+// gives the note's voices (Instrument::noteExpression): native engines move them, a hosted plugin with MPE on sends
+// them on the note's member channel. `occurrence` = the note's start in song ticks (this repetition of it).
+void emitCurves (const Note& note, double occurrence, std::int64_t length, double startTick, int numSamples, double tps,
+                 EventBuffer& out) noexcept
+{
+    constexpr std::uint8_t propPitch = 1, propModX = 3, propModY = 4; // vfx::Prop
+    const auto& c = *note.curves;
+    const bool lanes[3] = { c.moves (NoteCurveLane::pitch), c.moves (NoteCurveLane::timbre), c.moves (NoteCurveLane::pressure) };
+    if (! lanes[0] && ! lanes[1] && ! lanes[2])
+        return;
+    const auto first = std::nearbyint (startTick / tps);
+    const auto step = std::max (64, (numSamples + 15) / 16);
+    const auto from = std::max (0.0, std::floor (occurrence / tps - first) + 1.0);
+    const auto to = std::min ((double) numSamples - 1.0, std::ceil (((double) occurrence + (double) length) / tps - first) - 1.0);
+    if (to < from)
+        return;
+    const auto grid = (std::int64_t) first;
+    auto j = (std::int64_t) from;
+    if (const auto r = (grid + j) % step; r != 0)
+        j += step - (r < 0 ? r + step : r);
+    for (; (double) j <= to; j += step)
+    {
+        const auto rel = (double) (grid + j) * tps - occurrence;
+        if (rel <= 0.0 || rel >= (double) length)
+            continue;
+        const auto v = curveValuesAt (note, rel);
+        NoteEvent e;
+        e.type = NoteEvent::Type::voiceProp;
+        e.expression = true;
+        e.sampleOffset = (int) j;
+        e.channel = note.channel;
+        e.key = note.key;
+        e.colour = (std::int8_t) (note.colour & 15);
+        const float values[3] = { v.cents, v.modX, v.modY };
+        const std::uint8_t props[3] = { propPitch, propModX, propModY };
+        for (int lane = 0; lane < 3; ++lane)
+            if (lanes[lane])
+            {
+                e.prop = props[lane];
+                e.velocity = values[lane];
+                out.add (e);
+            }
+    }
+}
 } // namespace
 
 // FL's Misc › Time (REA round 146b [EXEC]): Shift delays a channel's notes (on and off), Gate cuts the long ones to its
@@ -190,6 +255,12 @@ void schedulePatternLoop (const Pattern& pattern,
         on.modY = note.modY;
         on.release = note.release;
         on.colour = (std::int8_t) (note.colour & 15);
+        const auto curved = note.curves.has(); // (issue #108: the note starts at its curves' first values)
+        if (curved)
+        {
+            const auto v = curveValuesAt (note, 0.0);
+            on.cents = v.cents, on.modX = v.modX, on.modY = v.modY;
+        }
         const auto timing = noteTiming (note, swing, channelOf (channels, note.channel));
         const auto start = timing.start;
 
@@ -200,19 +271,61 @@ void schedulePatternLoop (const Pattern& pattern,
             emit ((double) start, on);
             continue; // slide has no "off": the original note continues until its own end
         }
-
-        on.lengthTicks = (float) timing.length;
-        emit ((double) start, on);
-        if (chase && (double) start + tps <= position && (double) (start + timing.length) > position)
+        if (note.heldStep()) // FL's step note on a generator (round 190oz): no note-off, no repeats
         {
-            on.sampleOffset = 0; // a note crossing the start position ("Play truncated notes on transport")
-            on.lengthTicks = (float) ((double) (start + timing.length) - position);
-            auto velocity = on.velocity;
-            if (roll == nullptr || chance::plays (*roll, linear ? 0 : passAt (startTick, (double) patternLength), velocity))
+            on.lengthTicks = -1.0f;
+            emit ((double) start, on);
+            continue;
+        }
+
+        // FL's note repeat (issue #208, core/NoteRepeat.h): each strike is a note of its own, to the next strike
+        noterepeat::forEachStrike (note, start, timing.length, [&] (std::int64_t strikeStart, std::int64_t strikeLength, int) {
+            on.lengthTicks = (float) strikeLength;
+            emit ((double) strikeStart, on);
+            if (chase && (double) strikeStart + tps <= position && (double) (strikeStart + strikeLength) > position)
             {
                 auto chased = on;
-                chased.velocity = velocity;
-                out.add (chased);
+                chased.sampleOffset = 0; // a note crossing the start position ("Play truncated notes on transport")
+                chased.lengthTicks = (float) ((double) (strikeStart + strikeLength) - position);
+                auto velocity = on.velocity;
+                if (roll == nullptr || chance::plays (*roll, linear ? 0 : passAt (startTick, (double) patternLength), velocity))
+                {
+                    chased.velocity = velocity;
+                    if (curved) // (it starts where its curves are at that point)
+                    {
+                        const auto v = curveValuesAt (note, position - (double) start);
+                        chased.cents = v.cents, chased.modX = v.modX, chased.modY = v.modY;
+                    }
+                    out.add (chased);
+                }
+            }
+            if (strikeStart + strikeLength < start + timing.length) // (the last strike's "off" is the note's own, below)
+            {
+                NoteEvent cut = on;
+                cut.type = NoteEvent::Type::off;
+                cut.velocity = 0.0f;
+                emit ((double) (strikeStart + strikeLength), cut);
+            }
+        });
+        if (curved)
+        {
+            // the note's repetitions sounding in this block (a loop: every pass; once: at the origin)
+            auto drawn = 0.0f;
+            if (linear)
+            {
+                if (roll == nullptr || chance::plays (*roll, 0, drawn))
+                    emitCurves (note, linearOrigin + (double) start, timing.length, startTick, numSamples, tps, out);
+            }
+            else
+            {
+                const auto len = (double) patternLength;
+                for (auto k = std::ceil ((startTick - (double) start - (double) timing.length) / len); (double) start + k * len < endTick; k += 1.0)
+                {
+                    auto velocity = 0.0f;
+                    if (roll != nullptr && ! chance::plays (*roll, (std::int64_t) k, velocity))
+                        continue;
+                    emitCurves (note, (double) start + k * len, timing.length, startTick, numSamples, tps, out);
+                }
             }
         }
 
@@ -232,13 +345,35 @@ void ScheduledNotes::process (EventBuffer& events, int numSamples, double tps) n
 
     const auto total = events.size();
     auto kept = 0;
+    // (round 190oz) the "off"s of held step notes whose channel starts a note in this block
+    struct HeldOff { int channel, key, offset; std::uint32_t id; };
+    std::array<HeldOff, 64> heldOffs; // (trivial: nothing is written unless a held step ends)
+    int heldOffCount = 0;
     for (int i = 0; i < total; ++i)
     {
         const auto e = events[i];
         const auto note = e.channel >= 0 && e.key >= 0 && e.key < audioClipKeyBase;
 
+        if (note && e.type == NoteEvent::Type::on && heldCount > 0)
+            for (int k = 0; k < heldCount; ++k)
+                if (held[(std::size_t) k].channel == e.channel)
+                {
+                    if (heldOffCount < (int) heldOffs.size())
+                        heldOffs[(std::size_t) heldOffCount++] = { e.channel, held[(std::size_t) k].key, e.sampleOffset, held[(std::size_t) k].id };
+                    held[(std::size_t) k] = held[(std::size_t) --heldCount];
+                    break;
+                }
+
         auto id = 0u;
-        if (note && e.type == NoteEvent::Type::on)
+        if (note && e.type == NoteEvent::Type::on && e.lengthTicks < 0.0f)
+        {
+            // a held step note (round 190oz): its id, no end of its own; its channel's next note ends it
+            id = nextId;
+            nextId = nextId >= 0xffffffu ? 1u : nextId + 1u;
+            if (heldCount < (int) held.size())
+                held[(std::size_t) heldCount++] = { e.channel, e.key, 0.0, id };
+        }
+        else if (note && e.type == NoteEvent::Type::on)
         {
             if (count < capacity)
             {
@@ -281,6 +416,18 @@ void ScheduledNotes::process (EventBuffer& events, int numSamples, double tps) n
     events.resize (kept);
 
     auto added = false;
+    for (int k = 0; k < heldOffCount; ++k)
+    {
+        NoteEvent off;
+        off.type = NoteEvent::Type::off;
+        off.channel = heldOffs[(std::size_t) k].channel;
+        off.key = heldOffs[(std::size_t) k].key;
+        off.velocity = 0.0f;
+        off.sampleOffset = heldOffs[(std::size_t) k].offset;
+        off.noteId = heldOffs[(std::size_t) k].id;
+        events.add (off);
+        added = true;
+    }
     for (int k = 0; k < count;)
     {
         const auto due = (entries[(std::size_t) k].end - clock) / tps + dueSamples; // samples into this block
@@ -318,6 +465,17 @@ void ScheduledNotes::moveChannels (const std::vector<int>& from) noexcept
         entries[(std::size_t) kept++] = entry;
     }
     count = kept;
+    kept = 0;
+    for (int k = 0; k < heldCount; ++k) // (round 190oz: the held step notes follow their channels too)
+    {
+        auto entry = held[(std::size_t) k];
+        const auto moved = std::find (from.begin(), from.end(), entry.channel);
+        if (moved == from.end())
+            continue;
+        entry.channel = (int) (moved - from.begin());
+        held[(std::size_t) kept++] = entry;
+    }
+    heldCount = kept;
 }
 
 ScheduleIndex makeScheduleIndex (const Song& song)
@@ -462,6 +620,20 @@ double hostPositionTick (const Song& song, double tick, std::int64_t songLength)
         return tick;
     const auto& pattern = song.patterns[(std::size_t) std::clamp (song.currentPattern, 0, (int) song.patterns.size() - 1)];
     return std::fmod (tick, (double) std::max<std::int64_t> (1, pattern.effectiveLength (song.meter())));
+}
+
+HostPositionWrap hostPositionWrap (const Song& song, std::int64_t songLength) noexcept
+{
+    if (song.mode == PlayMode::song)
+    {
+        if (song.loopPlays())
+            return { (double) song.loopEnd, (double) song.loopStart };
+        return song.hasLoop() ? HostPositionWrap {} : HostPositionWrap { (double) std::max<std::int64_t> (1, songLength), 0.0 };
+    }
+    if (song.patterns.empty())
+        return {};
+    const auto& pattern = song.patterns[(std::size_t) std::clamp (song.currentPattern, 0, (int) song.patterns.size() - 1)];
+    return { (double) std::max<std::int64_t> (1, pattern.effectiveLength (song.meter())), 0.0 };
 }
 
 // An audio clip's note (round 190ey: out of scheduleClip, so a Playlist preview plays the clip through its channel the
@@ -692,7 +864,10 @@ void scheduleClip (const Song& song, const Clip& clip, std::size_t clipIndex, do
             auto off = std::min (on + timing.length, clip.end());
 
             // FL's "Play truncated notes in clips" (FUN_010608a0): a note starting before the clip's offset keeps what is
-            // left of it from the clip's start (dropped when nothing is left); off: dropped
+            // left of it from the clip's start (dropped when nothing is left); off: dropped. A held step note has
+            // nothing left (length 0 in FL, round 190oz)
+            if (start < clip.offset && note.heldStep())
+                continue;
             if (start < clip.offset)
             {
                 const auto left = start + timing.length - clip.offset;
@@ -710,7 +885,9 @@ void scheduleClip (const Song& song, const Clip& clip, std::size_t clipIndex, do
             NoteEvent e;
             e.type = NoteEvent::Type::on;
             e.channel = note.channel;
-            e.key = note.key;
+            // round 190pf (core/ChordLane.h): a channel that follows the Chord lane plays the note moved onto the chord
+            // under it (its "off" comes from this event, so it has the same key); every other channel: the note's key
+            e.key = chordlane::playedKey (song, channelOf (&song.channels, note.channel), note.key, on);
             e.velocity = grooveVelocity;
             e.pan = note.pan;
             e.cents = note.finePitch;
@@ -719,6 +896,15 @@ void scheduleClip (const Song& song, const Clip& clip, std::size_t clipIndex, do
             e.modY = note.modY;
             e.release = note.release;
             e.colour = (std::int8_t) (note.colour & 15);
+            // round 190om: a note's own curves (issue #108, core/NoteCurves.h; an imported module's pitch slides) play in
+            // the Playlist's clips too — the note starts where its curves are (where the clip cuts in, for a truncated one)
+            // and their moves go to its voices; before, only pattern mode played them. Notes without curves: unchanged.
+            const auto curvedAt = note.curves.has() ? (double) on - (start < clip.offset ? (double) (clip.offset - start) : 0.0) : -1.0;
+            if (curvedAt >= 0.0)
+            {
+                const auto v = curveValuesAt (note, (double) on - curvedAt);
+                e.cents = v.cents, e.modX = v.modX, e.modY = v.modY;
+            }
 
             if (note.slide)
             {
@@ -727,25 +913,47 @@ void scheduleClip (const Song& song, const Clip& clip, std::size_t clipIndex, do
                 emitOccurrences ((double) on, loop, startTick, endTick, tps, numSamples, e, out, roll);
                 continue;
             }
-
-            e.lengthTicks = (float) (off - on);
-            emitOccurrences ((double) on, loop, startTick, endTick, tps, numSamples, e, out, roll);
-            if (chase && (double) on + tps <= loopStart && (double) off > loopStart)
+            if (note.heldStep()) // FL's step note on a generator (round 190oz): no note-off, no repeats
             {
-                e.sampleOffset = 0; // a note crossing the start position ("Play truncated notes on transport")
-                e.lengthTicks = (float) ((double) off - loopStart);
-                auto velocity = e.velocity;
-                if (roll == nullptr || chance::plays (*roll, passAt (startTick, (double) loop), velocity))
-                {
-                    auto chased = e;
-                    chased.velocity = velocity;
-                    out.add (chased);
-                }
+                e.lengthTicks = -1.0f;
+                emitOccurrences ((double) on, loop, startTick, endTick, tps, numSamples, e, out, roll);
+                continue;
             }
 
-            e.type = NoteEvent::Type::off;
-            e.velocity = 0.0f;
-            emitOccurrences ((double) off, loop, startTick, endTick, tps, numSamples, e, out, roll);
+            // FL's note repeat (issue #208, core/NoteRepeat.h): each strike a note of its own, to the next strike
+            noterepeat::forEachStrike (note, on, off - on, [&] (std::int64_t strikeOn, std::int64_t strikeLength, int) {
+                const auto strikeOff = strikeOn + strikeLength;
+                auto s = e;
+                s.lengthTicks = (float) strikeLength;
+                emitOccurrences ((double) strikeOn, loop, startTick, endTick, tps, numSamples, s, out, roll);
+                if (chase && (double) strikeOn + tps <= loopStart && (double) strikeOff > loopStart)
+                {
+                    s.sampleOffset = 0; // a note crossing the start position ("Play truncated notes on transport")
+                    s.lengthTicks = (float) ((double) strikeOff - loopStart);
+                    auto velocity = s.velocity;
+                    if (roll == nullptr || chance::plays (*roll, passAt (startTick, (double) loop), velocity))
+                    {
+                        auto chased = s;
+                        chased.velocity = velocity;
+                        out.add (chased);
+                    }
+                }
+                s.type = NoteEvent::Type::off;
+                s.velocity = 0.0f;
+                emitOccurrences ((double) strikeOff, loop, startTick, endTick, tps, numSamples, s, out, roll);
+            });
+            if (curvedAt >= 0.0) // (each repetition of the song's loop that reaches this block)
+            {
+                const auto length = std::max<std::int64_t> (1, off - (std::int64_t) curvedAt);
+                const auto len = (double) loop;
+                for (auto k = len > 0.0 ? std::ceil ((startTick - curvedAt - (double) length) / len) : 0.0; curvedAt + k * len < endTick; k += 1.0)
+                {
+                    if (curvedAt + k * len + (double) length > startTick)
+                        emitCurves (note, curvedAt + k * len, length, startTick, numSamples, tps, out);
+                    if (len <= 0.0)
+                        break;
+                }
+            }
         }
     };
 

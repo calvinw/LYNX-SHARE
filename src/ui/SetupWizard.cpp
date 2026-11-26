@@ -10,8 +10,10 @@
 #include "ui/AudioCheck.h"
 #include "engine/FlStudio.h"
 #include "ui/FileChoosers.h"
+#include "ui/DialogFrame.h"
 #include "ui/I18n.h"
 #include "ui/Theme.h"
+#include "ui/Updater.h"
 #include "platform/Paths.h"
 #include "platform/FileTypes.h"
 
@@ -37,6 +39,23 @@ public:
         setText (text, juce::dontSendNotification);
         setFont (theme::font (theme::type::title, true));
         setColour (juce::Label::textColourId, theme::colour::textPrimary);
+    }
+};
+
+// round 190jp (design190ia SG-24): a workflow choice's name in bold body text over its smaller description (the name
+// was drawn smaller than the text under it)
+class RadioChoice final : public juce::ToggleButton
+{
+public:
+    explicit RadioChoice (const juce::String& text) : juce::ToggleButton (text) {}
+
+    void paintButton (juce::Graphics& g, bool over, bool down) override
+    {
+        const auto tick = juce::jmin (16.0f, (float) getHeight() - 4.0f);
+        getLookAndFeel().drawTickBox (g, *this, 2.0f, ((float) getHeight() - tick) * 0.5f, tick, tick, getToggleState(), isEnabled(), over, down);
+        g.setColour (theme::colour::textPrimary.withMultipliedAlpha (isEnabled() ? 1.0f : 0.5f));
+        g.setFont (theme::font (theme::type::body, true));
+        g.drawFittedText (getButtonText(), getLocalBounds().withTrimmedLeft (juce::roundToInt (tick) + 8), juce::Justification::centredLeft, 1, 0.85f);
     }
 };
 
@@ -66,10 +85,18 @@ public:
         intro.setColour (juce::Label::textColourId, theme::colour::textSecondary);
         intro.setJustificationType (juce::Justification::topLeft);
         intro.setMinimumHorizontalScale (1.0f);
+        languageLabel.setFont (theme::font (theme::type::body)); // (as the device selector's row labels beside it)
+        languageLabel.setColour (juce::Label::textColourId, theme::colour::textPrimary);
+        languageLabel.setJustificationType (juce::Justification::centredRight);
         for (auto* c : std::initializer_list<juce::Component*> { &title, &intro, &languageLabel, &languageBox, &audioLabel, &devices, &flLabel,
                                                                  &flStatus, &foldersLabel, &folders, &addFolder, &removeFolder, &resetFolders,
-                                                                 &scanNow, &progressBar, &scanStatus, &scanAtStart, &workflowLabel })
+                                                                 &scanNow, &progressBar, &scanStatus, &scanAtStart, &workflowLabel, &workflowIntro })
             body.addAndMakeVisible (c);
+        // round 190hw: one line on what the three styles are for, above the choices
+        workflowIntro.setText (tr ("Three workflows in one program. Switch any time in View › Layout style: the project stays the same, only the windows change."), juce::dontSendNotification);
+        workflowIntro.setColour (juce::Label::textColourId, theme::colour::textSecondary);
+        workflowIntro.setJustificationType (juce::Justification::topLeft);
+        workflowIntro.setMinimumHorizontalScale (1.0f);
         // round 184a S17: the three layout styles, the current one (Pattern workflow on a first start) selected
         for (int i = 0; i < layoutstyle::count; ++i)
         {
@@ -79,7 +106,7 @@ public:
             choice.setToggleState (i == initialStyle, juce::dontSendNotification);
             body.addAndMakeVisible (choice);
             auto& note = styleNotes[(std::size_t) i];
-            // the Settings page's explanation starts with the style's name ("Simple workflow: one window..."); here the
+            // the Settings page's explanation starts with the style's name ("Simple workflow: BandLab's..."); here the
             // name is the button just above it, so the line keeps only what follows the colon
             auto text = note.getText();
             for (const auto* colon : { ":", "\xef\xbc\x9a" }) // (an ASCII or a full-width colon, as the translations use)
@@ -91,6 +118,7 @@ public:
                 }
             note.setText (text, juce::dontSendNotification);
             note.setColour (juce::Label::textColourId, theme::colour::textSecondary);
+            note.setFont (theme::font (theme::type::small)); // (round 190jp, SG-24: under the bold name, a step smaller)
             note.setJustificationType (juce::Justification::topLeft);
             note.setMinimumHorizontalScale (1.0f);
             note.setBorderSize (juce::BorderSize<int> (0, 26, 0, 0)); // under the name, past the radio dot
@@ -98,8 +126,18 @@ public:
         }
         // the Linux AppImage (round 161): an applications-menu entry and the .lynx file type, on by default
         body.addChildComponent (menuEntry);
-        menuEntry.setVisible (runningAsAppImage());
+        menuEntry.setVisible (runningAsAppImage() && ! appImageInMenuByManager()); // (issue #278: a manager has it in the menu)
         menuEntry.setToggleState (true, juce::dontSendNotification);
+        // issue #233 (round 190ns): the one connection LYNX makes by itself, chosen here before it ever runs (the
+        // automatic check waits for this wizard: updater::startAutomaticCheck)
+        for (auto* c : std::initializer_list<juce::Component*> { &updatesLabel, &checkUpdates, &updatesNote })
+            body.addChildComponent (c);
+        for (auto* c : std::initializer_list<juce::Component*> { &updatesLabel, &checkUpdates, &updatesNote })
+            c->setVisible (updater::offered()); // (not the Store build: the Store updates it)
+        checkUpdates.setToggleState (updater::automatic(), juce::dontSendNotification);
+        updatesNote.setColour (juce::Label::textColourId, theme::colour::textSecondary);
+        updatesNote.setJustificationType (juce::Justification::topLeft);
+        updatesNote.setMinimumHorizontalScale (1.0f);
         viewport.setViewedComponent (&body, false);
         viewport.setScrollBarsShown (true, false);
         viewport.setScrollBarThickness (10);
@@ -273,19 +311,25 @@ private:
         intro.setBounds (r.removeFromTop (textHeight (intro, w, 22)));
         r.removeFromTop (8);
 
+        // round 190jp (design190ia SG-24): the Language row on the audio device selector's grid (JUCE's selector puts
+        // its labels right-aligned in the left 35 % and its boxes from there, 60 % wide)
         auto row = r.removeFromTop (26);
-        languageLabel.setBounds (row.removeFromLeft (150));
-        languageBox.setBounds (row.removeFromLeft (juce::jmin (220, row.getWidth())));
-        r.removeFromTop (10);
+        const auto gridX = juce::roundToInt ((float) w * 0.35f);
+        languageLabel.setBounds (row.removeFromLeft (gridX).withTrimmedRight (5));
+        languageBox.setBounds (row.removeFromLeft (juce::jmin (juce::roundToInt ((float) w * 0.6f), row.getWidth())));
+        r.removeFromTop (20);
 
         workflowLabel.setBounds (r.removeFromTop (24));
+        r.removeFromTop (8);
+        workflowIntro.setBounds (r.removeFromTop (textHeight (workflowIntro, w, 18)));
+        r.removeFromTop (4);
         for (int i = 0; i < layoutstyle::count; ++i)
         {
             styleChoices[(std::size_t) i].setBounds (r.removeFromTop (22));
             styleNotes[(std::size_t) i].setBounds (r.removeFromTop (textHeight (styleNotes[(std::size_t) i], w, 18)));
             r.removeFromTop (2);
         }
-        r.removeFromTop (8);
+        r.removeFromTop (20);
 
         audioLabel.setBounds (r.removeFromTop (24));
         devices.setBounds (r.getX(), r.getY(), w, 200); // its resized() sets its own height
@@ -298,11 +342,14 @@ private:
             r.removeFromTop (h + 6);
         }
 
+        r.removeFromTop (14);
         flLabel.setBounds (r.removeFromTop (24));
+        r.removeFromTop (4);
         flStatus.setBounds (r.removeFromTop (textHeight (flStatus, w, 22)));
-        r.removeFromTop (10);
+        r.removeFromTop (20);
 
         foldersLabel.setBounds (r.removeFromTop (24));
+        r.removeFromTop (8);
         auto list = r.removeFromTop (118);
         auto buttons = list.removeFromRight (juce::jmin (150, w / 3));
         folders.setBounds (list.withTrimmedRight (8));
@@ -322,6 +369,14 @@ private:
         scanAtStart.setBounds (r.removeFromTop (24));
         if (menuEntry.isVisible())
             menuEntry.setBounds (r.removeFromTop (24));
+        if (checkUpdates.isVisible()) // (round 190ns, issue #233)
+        {
+            r.removeFromTop (20);
+            updatesLabel.setBounds (r.removeFromTop (24));
+            r.removeFromTop (4);
+            checkUpdates.setBounds (r.removeFromTop (24));
+            updatesNote.setBounds (r.removeFromTop (textHeight (updatesNote, w, 22)));
+        }
         r.removeFromTop (12);
         return r.getY();
     }
@@ -389,6 +444,12 @@ private:
         if (const auto style = chosenStyle(); style != initialStyle && onLayoutStyle) // (before close() deletes this)
             onLayoutStyle (style);
         markSetupWizardDone();
+        if (updater::offered()) // (round 190ns, issue #233: the choice made here; ticked, the first check runs now)
+        {
+            updater::setAutomatic (checkUpdates.getToggleState());
+            if (checkUpdates.getToggleState())
+                updater::startAutomaticCheck();
+        }
         if (runningAsAppImage())
             setAppImageMenuEntry (menuEntry.getToggleState());
         // (keeps going after the window closes) only when asked for: with "every start" unticked, nothing scans here
@@ -433,17 +494,17 @@ private:
     juce::Component body; // the scrolling content
     juce::Viewport viewport;
     bool layingOut = false;
-    juce::Label title, intro, flStatus, scanStatus;
+    juce::Label title, intro, flStatus, scanStatus, workflowIntro;
     SectionLabel workflowLabel { tr ("Workflow") };
-    std::array<juce::ToggleButton, layoutstyle::count> styleChoices { juce::ToggleButton (tr ("Pattern workflow (default)")),
-                                                                      juce::ToggleButton (tr ("Clip-launch workflow")),
-                                                                      juce::ToggleButton (tr ("Simple workflow")) };
+    std::array<RadioChoice, layoutstyle::count> styleChoices { RadioChoice (tr ("Pattern workflow (default)")), RadioChoice (tr ("Clip-launch workflow")),
+                                                               RadioChoice (tr ("Simple workflow")) };
     std::array<juce::Label, layoutstyle::count> styleNotes {
-        juce::Label ({}, tr ("Pattern workflow: channel rack, patterns and a Playlist.")),
-        juce::Label ({}, tr ("Clip-launch workflow: a clip grid with scenes beside the Playlist; patterns and the channel rack stay one click away.")),
-        juce::Label ({}, tr ("Simple workflow: one window with the tracks and the timeline; the other windows stay one click away."))
+        juce::Label ({}, tr ("Pattern workflow: works the way FL Studio does, with the Channel Rack, Piano Roll, Playlist and Mixer.")),
+        juce::Label ({}, tr ("Clip-launch workflow: clips and scenes launched from a grid, in the style of Ableton Live, with a Session mixer and the clip and device views; patterns and the Channel Rack stay one click away.")),
+        juce::Label ({}, tr ("Simple workflow: BandLab's approachable one-window style mixed with FL Studio Mobile's way of working, with tracks and a timeline, loops, pads and quick recording; FL Studio Mobile projects (.flm) open too."))
     };
-    SectionLabel languageLabel { tr ("Language") }, audioLabel { tr ("Audio output") }, flLabel { "FL Studio" },
+    juce::Label languageLabel { {}, tr ("Language") };
+    SectionLabel audioLabel { tr ("Audio output") }, flLabel { "FL Studio" },
         foldersLabel { tr ("Plugin folders ({0})", { platform::pluginFormatNames() }) };
     juce::ComboBox languageBox;
     juce::AudioDeviceSelectorComponent devices;
@@ -457,6 +518,11 @@ private:
     juce::ProgressBar progressBar { progress };
     juce::ToggleButton scanAtStart { tr ("Look for new plugins in the background at every start") };
     juce::ToggleButton menuEntry { tr ("Show LYNX SHARE in the applications menu and open .lynx files with it") };
+    // round 190ns (issue #233): the automatic update check, the only connection LYNX SHARE makes by itself
+    SectionLabel updatesLabel { tr ("Updates") };
+    juce::ToggleButton checkUpdates { tr ("Check for updates automatically") };
+    juce::Label updatesNote { {}, tr ("A few seconds after start-up LYNX SHARE asks GitHub for the newest version number; nothing about you is sent. "
+                                      "It is the only connection LYNX SHARE makes by itself: plugin scans and everything else stay on this computer.") };
     std::unique_ptr<juce::FileChooser> chooser;
     bool scanStarted = false;
 };
@@ -484,8 +550,10 @@ public:
             g.setColour (juce::Colours::black.withAlpha (0.08f));
             g.drawRoundedRectangle (panel.expanded ((float) i), 4.0f + (float) i, 2.0f);
         }
-        g.setColour (theme::colour::accent.withAlpha (0.6f));
-        g.drawRect (wizard.getBounds().expanded (1), 1);
+        // round 190jp (design190ia SG-20): the one LYNX dialog frame (1 px frame, the 3 px accent strip on top) instead of
+        // a red outline of its own; the wizard's big title stays in its body (SG-24)
+        const auto frame = wizard.getBounds().expanded (1).withTop (wizard.getY() - 1 - ui::dialog::accentStrip);
+        ui::dialog::paintFrame (g, frame.toFloat(), ui::dialog::Kind::window, false);
     }
 
     void resized() override

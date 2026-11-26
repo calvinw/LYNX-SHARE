@@ -21,7 +21,9 @@ juce::File fileFor (const std::string& path)
 bool exportZip (const Song& song, const juce::String& projectName, const juce::File& zip, Result& result, juce::String& error)
 {
     result = {};
-    const auto plan = safety::packagePlan (song, "samples");
+    // FL's zipped loop package (round 190oq, REA FUN_011dc560): the project and its files side by side, flat, by name
+    // (FL warns when two have one name and may lose one; LYNX gives the second a unique name instead)
+    const auto plan = safety::packagePlan (song, "");
 
     Song packed = song;
     std::map<std::string, std::string> relink;
@@ -102,6 +104,75 @@ bool collectSamples (const Song& song, const juce::File& folder, std::map<std::s
     return true;
 }
 
+bool copyDataFiles (const Song& song, const juce::File& folder, Result& result, juce::String& error)
+{
+    // FL's Export › Project data files (round 190oq, REA FUN_011ec0f0): every file the project uses copied flat into one
+    // folder (unique names, nothing overwritten); the project keeps its own paths and no project file is written
+    result = {};
+    if (! folder.createDirectory())
+    {
+        error = "could not create " + folder.getFullPathName();
+        return false;
+    }
+    for (const auto& original : safety::referencedSamples (song))
+    {
+        const auto source = fileFor (original);
+        if (! source.existsAsFile())
+        {
+            result.missing.add (str (original));
+            continue;
+        }
+        const auto stem = safety::uniqueName (source.getFileNameWithoutExtension().toStdString(), [&] (const std::string& n) {
+            return folder.getChildFile (str (n) + source.getFileExtension()).exists();
+        });
+        if (! source.copyFileTo (folder.getChildFile (str (stem) + source.getFileExtension())))
+        {
+            error = "could not copy " + source.getFullPathName();
+            return false;
+        }
+        ++result.files;
+    }
+    return true;
+}
+
+bool collectIntoProject (const Song& song, const juce::File& projectFolder, std::map<std::string, std::string>& relink, Result& result,
+                         juce::String& error)
+{
+    // Live's File › Collect All and Save (round 190oq, issue #251): the files outside the project's folder are copied into
+    // <project>/Samples/Imported and the project uses the copies; files already inside the folder stay where they are
+    result = {};
+    relink.clear();
+    const auto target = projectFolder.getChildFile ("Samples").getChildFile ("Imported");
+    for (const auto& original : safety::referencedSamples (song))
+    {
+        const auto source = fileFor (original);
+        if (! source.existsAsFile())
+        {
+            result.missing.add (str (original));
+            continue;
+        }
+        if (source.isAChildOf (projectFolder))
+            continue;
+        if (! target.createDirectory())
+        {
+            error = "could not create " + target.getFullPathName();
+            return false;
+        }
+        const auto stem = safety::uniqueName (source.getFileNameWithoutExtension().toStdString(), [&] (const std::string& n) {
+            return target.getChildFile (str (n) + source.getFileExtension()).exists();
+        });
+        const auto copy = target.getChildFile (str (stem) + source.getFileExtension());
+        if (! source.copyFileTo (copy))
+        {
+            error = "could not copy " + source.getFullPathName();
+            return false;
+        }
+        relink[original] = copy.getFullPathName().toStdString();
+        ++result.files;
+    }
+    return true;
+}
+
 juce::File extractZip (const juce::File& zipFile, const juce::File& destinationRoot, juce::String& error)
 {
     juce::ZipFile zip (zipFile);
@@ -114,7 +185,13 @@ juce::File extractZip (const juce::File& zipFile, const juce::File& destinationR
     bool hasProject = false;
     for (int i = 0; i < zip.getNumEntries(); ++i)
         if (const auto* e = zip.getEntry (i); e != nullptr && (e->filename.endsWithIgnoreCase (ProjectFile::extension) || e->filename.endsWithIgnoreCase (".flp")
-                                                         || e->filename.endsWithIgnoreCase (".flm")))
+                                                         || e->filename.endsWithIgnoreCase (".flm")
+                                                         || e->filename.containsIgnoreCase (".band/projectData")
+                                                         || e->filename.containsIgnoreCase (".band/Alternatives/000/ProjectData")
+                                                         || (zipFile.hasFileExtension ("band") && (e->filename == "projectData" || e->filename == "Alternatives/000/ProjectData"))
+                                                         // (round 190jr: a BandLab .blx, or a zipped .blx holding its JSON)
+                                                         || e->filename.endsWithIgnoreCase (".blx")
+                                                         || (zipFile.hasFileExtension ("blx") && e->filename.endsWithIgnoreCase (".json"))))
             hasProject = true;
     if (! hasProject)
     {
@@ -123,7 +200,10 @@ juce::File extractZip (const juce::File& zipFile, const juce::File& destinationR
     }
 
     destinationRoot.createDirectory();
-    const auto folder = destinationRoot.getNonexistentChildFile (juce::File::createLegalFileName (zipFile.getFileNameWithoutExtension()), {}, false);
+    // (round 190ic: a GarageBand song that arrived as one zipped file, "Song.band", unpacks into a "Song.band" folder)
+    const auto zippedBand = zipFile.hasFileExtension ("band");
+    const auto folder = destinationRoot.getNonexistentChildFile (juce::File::createLegalFileName (zipFile.getFileNameWithoutExtension()),
+                                                                 zippedBand ? ".band" : "", false);
     if (! folder.createDirectory())
     {
         error = "could not create " + folder.getFullPathName();
@@ -136,14 +216,43 @@ juce::File extractZip (const juce::File& zipFile, const juce::File& destinationR
     }
 
     // (an FL Studio Mobile share-zip, round 182c: the .flm with its library tree, "My Samples/…", beside it)
-    for (const auto* pattern : { "*.lynx", "*.flp", "*.flm" })
+    for (const auto* pattern : { "*.lynx", "*.flp", "*.flm", "*.blx" })
     {
         auto found = folder.findChildFiles (juce::File::findFiles, true, pattern);
         found.sort();
         if (! found.isEmpty())
             return found.getFirst();
     }
+    // (round 190jr: a .blx that was a zip of its revision JSON: the JSON becomes "<name>.blx" beside its samples)
+    if (zipFile.hasFileExtension ("blx"))
+    {
+        auto found = folder.findChildFiles (juce::File::findFiles, true, "*.json");
+        found.sort();
+        if (! found.isEmpty())
+        {
+            const auto blx = found.getFirst().getSiblingFile (juce::File::createLegalFileName (zipFile.getFileNameWithoutExtension()) + ".blx");
+            if (found.getFirst().copyFileTo (blx))
+                return blx;
+        }
+    }
+    // (round 190ic: a GarageBand song, shared from GarageBand for iOS as a zip of its .band folder, or zipped itself)
+    if (zippedBand && garageBandPackage (folder) == folder)
+        return folder;
+    auto bands = folder.findChildFiles (juce::File::findDirectories, true, "*.band");
+    bands.sort();
+    for (const auto& band : bands)
+        if (garageBandPackage (band) == band)
+            return band;
     error = "the package has no project file (.lynx, .flp or .flm)";
+    return {};
+}
+
+juce::File garageBandPackage (const juce::File& file)
+{
+    for (auto f = file; f != juce::File() && f.getParentDirectory() != f; f = f.getParentDirectory())
+        if (f.isDirectory() && f.hasFileExtension ("band")
+            && (f.getChildFile ("projectData").existsAsFile() || f.getChildFile ("Alternatives/000/ProjectData").existsAsFile()))
+            return f;
     return {};
 }
 

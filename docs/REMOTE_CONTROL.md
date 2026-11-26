@@ -11,6 +11,10 @@ removes its discovery record. Automated launches can explicitly set
 `LYNX_CONTROL_ENABLED=1`; setting a discovery path alone does not enable access.
 The ordinary update preference and automatic update check are unchanged.
 
+`LYNX --demo` (a developer mode for scripted recordings, [DEMO_MODE.md](DEMO_MODE.md)) turns Remote Control on for
+that run, hides its status strip and adds view operations (`ui.*`, `session.*`) that find and click controls by
+component ID.
+
 ## Discovery and authentication
 
 The default record is `control/connection.json` inside LYNX's settings folder:
@@ -111,13 +115,19 @@ no credential.
 
 Every `pattern.notes` object contains `start`, `length`, `channel`, `key`,
 `velocity`, `pan`, `muted`, `finePitch`, `slide`, `porta`, `release`, `modX`,
-`modY`, `colour`, `group`, `chance`, `velocityRange`, `chanceGroup` and
-`chanceOne`. `pattern.replace_notes` requires all these fields, including
+`modY`, `colour`, `group`, `chance`, `velocityRange`, `chanceGroup`,
+`chanceOne` and `expression`. `pattern.replace_notes` requires all these fields, including
 default values, and rejects unsupported fields. Read the complete notes before
 replacing them so an edit retains expression it does not intend to change.
 `chance` is a probability in `0..1`, `velocityRange` is in `-1..1`,
 `chanceGroup` is a nonnegative integer, and `chanceOne` is a boolean. A true
 `chanceOne` flag is retained even when its chance group is currently zero.
+`expression` holds the note's MPE curves (issue #108) as
+`{"pitch": [[tick, cents], ...], "timbre": [[tick, value], ...], "pressure": [[tick, value], ...]}`:
+all three lanes are required (an empty array = none), ticks count from the note's
+start (960 per quarter note) and must rise, pitch is in cents in `-4800..4800`
+(added to `finePitch`), timbre (the MPE slide, CC 74; 0.5 = 64) and pressure are
+in `0..1`, at most 4096 points per lane. Values are linear between points.
 
 ## Typed pattern operations
 

@@ -2,8 +2,11 @@
 
 #include "core/PluginCatalog.h"
 #include "core/Vfx.h"
+#include "ui/DemoMode.h"
 #include "ui/I18n.h"
 #include "ui/PluginManager.h"
+#include "ui/PluginPickerView.h"
+#include "ui/QuickPick.h"
 #include "engine/PluginHost.h"
 #include "engine/PluginSandbox.h"
 #include "ui/TextCache.h"
@@ -32,6 +35,7 @@ struct Group
 };
 
 class PluginPicker final : public juce::Component,
+                           public demo::CellSource,
                            private juce::TextEditor::Listener,
                            private juce::KeyListener
 {
@@ -39,31 +43,14 @@ public:
     PluginPicker (AudioEngine& e, bool instruments, std::function<void (PluginRef)> chosen, std::function<void (ChannelDef)> builtIn)
         : engine (e), onChosen (std::move (chosen)), onBuiltIn (std::move (builtIn))
     {
-        const auto& renamed = engine.getPluginHost().pluginNames(); // (the Plugin database's names: "1_EQ", round 165c)
+        buildEntries();
+        // issue #209: the Bits column from what is known; the plugins nobody looked at yet are read on a background
+        // thread (each first read of a plugin's file waits for the virus scanner), and the list follows when it is done
         const auto types = engine.getPluginHost().getKnownPlugins().getTypes();
-        // FL's Bits column and its "Combine 32 and 64 bit versions" (round 176a; Windows x64, where 32-bit plugins run)
-        std::vector<std::string> bits (types.size());
-        if (bridge32Supported())
-        {
-            std::vector<std::pair<std::string, bool>> builds;
-            for (const auto& type : types)
-                builds.emplace_back (PluginHost::bitnessKey (type), isPlugin32Bit (type));
-            bits = plugincatalog::combinedBits (builds);
-        }
-        for (int i = 0; i < types.size(); ++i)
-        {
-            const auto& type = types.getReference (i);
-            if (bridge32Supported() && bits[(std::size_t) i].empty())
-                continue; // the 32-bit build of a "32+64" plugin: its 64-bit entry stands for both
-            const auto id = type.createIdentifierString().toStdString();
-            const auto it = renamed.find (id);
-            entries.push_back ({ id, type.name.toStdString(), type.manufacturerName.toStdString(), type.pluginFormatName.toStdString(),
-                                 type.category.toStdString(), type.isInstrument, it != renamed.end() ? it->second : std::string(),
-                                 bits[(std::size_t) i] });
-        }
-        if (onBuiltIn) // FL's VFX note effects, built in (round 164b)
-            for (const auto kind : vfx::allKinds)
-                entries.push_back ({ builtInPrefix + std::to_string ((int) kind), vfx::flName (kind), "LYNX SHARE", "Built-in", "Note effect", true });
+        refreshPluginBitness (types, [safe = juce::Component::SafePointer<PluginPicker> (this)] {
+            if (safe != nullptr)
+                safe->bitsChanged();
+        });
 
         for (auto* b : { &instrumentsTab, &effectsTab })
         {
@@ -99,11 +86,89 @@ public:
         countLabel.setColour (juce::Label::textColourId, theme::colour::textSecondary);
         addAndMakeVisible (countLabel);
 
+        // round 190pl: by component ID for --demo (docs/DEMO_MODE.md); the list's rows are cells (column = the row shown,
+        // "name": by the plugin's name)
+        setComponentID ("pluginChooser");
+        search.setComponentID ("pluginChooser.search");
+        instrumentsTab.setComponentID ("pluginChooser.instruments");
+        effectsTab.setComponentID ("pluginChooser.effects");
+        manageButton.setComponentID ("pluginChooser.manage");
+        scanButton.setComponentID ("pluginChooser.scan");
+        addButton.setComponentID ("pluginChooser.add");
+
         setKind (instruments);
         setSize (760, 520);
     }
 
+    juce::Rectangle<int> demoCellBounds (int, int row) const override
+    {
+        if (! juce::isPositiveAndBelow (row, (int) shown.size()))
+            return {};
+        return getLocalArea (&list, list.getRowPosition (row, true));
+    }
+    juce::Rectangle<int> demoCellNamed (int, const juce::String& name) const override
+    {
+        for (int i = 0; i < (int) shown.size(); ++i)
+            if (juce::String::fromUTF8 (entries[(std::size_t) shown[(std::size_t) i]].name.c_str()) == name)
+                return demoCellBounds (0, i);
+        return {};
+    }
+
     void paint (juce::Graphics& g) override { g.fillAll (theme::colour::bg2); }
+
+    // The plugins as the list shows them. FL's Bits column and its "Combine 32 and 64 bit versions" (round 176a; Windows
+    // x64, where 32-bit plugins run): from the answers already known (issue #209: no plugin file is opened here), a
+    // plugin not looked at yet counts as 64-bit until refreshPluginBitness() says otherwise
+    void buildEntries()
+    {
+        entries.clear();
+        const auto& renamed = engine.getPluginHost().pluginNames(); // (the Plugin database's names: "1_EQ", round 165c)
+        const auto types = engine.getPluginHost().getKnownPlugins().getTypes();
+        std::vector<std::string> bits (types.size());
+        if (bridge32Supported())
+        {
+            std::vector<std::pair<std::string, bool>> builds;
+            for (const auto& type : types)
+                builds.emplace_back (PluginHost::bitnessKey (type), knownPlugin32Bit (type).value_or (false));
+            bits = plugincatalog::combinedBits (builds);
+        }
+        for (int i = 0; i < types.size(); ++i)
+        {
+            const auto& type = types.getReference (i);
+            if (bridge32Supported() && bits[(std::size_t) i].empty())
+                continue; // the 32-bit build of a "32+64" plugin: its 64-bit entry stands for both
+            const auto id = type.createIdentifierString().toStdString();
+            const auto it = renamed.find (id);
+            entries.push_back ({ id, type.name.toStdString(), type.manufacturerName.toStdString(), type.pluginFormatName.toStdString(),
+                                 type.category.toStdString(), type.isInstrument, it != renamed.end() ? it->second : std::string(),
+                                 bits[(std::size_t) i] });
+        }
+        if (onBuiltIn) // FL's VFX note effects, built in (round 164b)
+            for (const auto kind : vfx::allKinds)
+                entries.push_back ({ builtInPrefix + std::to_string ((int) kind), vfx::flName (kind), "LYNX SHARE", "Built-in", "Note effect", true });
+    }
+
+    // the background look at the plugins' files found new answers: the same list, its Bits column (and the "32+64"
+    // pairs) as they really are; the filter, the group and the highlighted plugin stay
+    void bitsChanged()
+    {
+        const auto row = list.getSelectedRow();
+        const auto selectedId = row >= 0 && row < (int) shown.size() ? entries[(std::size_t) shown[(std::size_t) row]].id : std::string();
+        const auto keepGroup = group;
+        buildEntries();
+        setKind (instruments);
+        if (keepGroup < (int) groupRows.size())
+        {
+            group = keepGroup;
+            refresh();
+        }
+        for (int i = 0; i < (int) shown.size(); ++i)
+            if (entries[(std::size_t) shown[(std::size_t) i]].id == selectedId)
+            {
+                list.selectRow (i);
+                break;
+            }
+    }
 
     void resized() override
     {
@@ -452,6 +517,40 @@ private:
     juce::Label countLabel;
 };
 } // namespace
+
+juce::String pluginPickerTimings (AudioEngine& engine)
+{
+    // issue #209 (--pickertime): how long each plugin list takes to open on the message thread, the first and the
+    // second time, built as the app builds them (not shown), and how long the background look at the plugins' files
+    // takes after the first one
+    const auto ms = [] (auto&& make) {
+        const auto t0 = juce::Time::getMillisecondCounterHiRes();
+        make();
+        return juce::Time::getMillisecondCounterHiRes() - t0;
+    };
+    const auto types = engine.getPluginHost().getKnownPlugins().getTypes();
+    int known = 0;
+    for (const auto& t : types)
+        known += knownPlugin32Bit (t).has_value() ? 1 : 0;
+    juce::String out;
+    out << "plugins=" << types.size() << " bits_known_before=" << known << "\n";
+    const auto bitsStart = juce::Time::getMillisecondCounterHiRes();
+    out << "list_instruments_first_ms=" << ms ([&] { PluginPicker p (engine, true, [] (PluginRef) {}, [] (ChannelDef) {}); }) << "\n";
+    out << "list_instruments_second_ms=" << ms ([&] { PluginPicker p (engine, true, [] (PluginRef) {}, [] (ChannelDef) {}); }) << "\n";
+    out << "list_effects_ms=" << ms ([&] { PluginPicker p (engine, false, [] (PluginRef) {}, nullptr); }) << "\n";
+    out << "generator_menu_ms=" << ms ([&] {
+        juce::PopupMenu menu;
+        quickpick::addGeneratorMenu (menu, engine, [] (ChannelDef) {}, nullptr, nullptr, nullptr);
+    }) << "\n";
+    out << "picker_view_ms=" << ms ([&] { auto view = makePluginPickerView (engine, {}); }) << "\n";
+    const auto done = waitForPluginBitness (600000);
+    out << "background_bits_ms=" << (juce::Time::getMillisecondCounterHiRes() - bitsStart) << (done ? "" : " (still running)") << "\n";
+    known = 0;
+    for (const auto& t : types)
+        known += knownPlugin32Bit (t).has_value() ? 1 : 0;
+    out << "bits_known_after=" << known << "\n";
+    return out;
+}
 
 void showPluginPicker (AudioEngine& engine, bool instruments, std::function<void (PluginRef)> onChosen, std::function<void (ChannelDef)> onBuiltIn)
 {

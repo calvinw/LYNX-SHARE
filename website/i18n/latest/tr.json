@@ -1,5 +1,10 @@
 {
-"u.0.1.29.t": "0.1.28 için düzeltme sürümü: Önceki sürüme geri dön çalışıyor",
-"u.0.1.29.s": "0.1.28 için küçük bir düzeltme sürümü. Yardım › Önceki sürüme geri dön artık daha önce kullandığınız sürümü kuruyor ve geri döndüğünüz eski sürüm size yeni sürümü hemen yeniden önermiyor.",
-"u.0.1.29.b0": "<strong>Yardım › Önceki sürüme geri dön</strong> (0.1.28'de yeni) 0.1.28'in kendisini öneriyordu. Artık daha önce kullandığınız sürümü, bir güncellemeyle aynı sağlama toplamı denetimiyle kuruyor ve bıraktığınız sürüm otomatik denetimde atlanıyor."
+"u.0.1.31.2.t": "0.1.31 için daha fazla düzeltme",
+"u.0.1.31.2.s": "LYNX SHARE 0.1.31.2 başlangıç sayfasındaki bir çökmenin olası nedenini, yerleştirilmiş VST3 eklentileri üzerindeki \"önce LYNX\" klavye ayarını, ilk ölçüsünü tekrarlayan uzatılmış klipleri, FL projelerinden oluşturulan otomasyon şeritlerini, FL'nin reddettiği dışa aktarılmış .flp dosyalarını, Browser'daki FL synth preset'lerini ve birkaç küçük sorunu düzeltiyor.",
+"u.0.1.31.2.f0": "Başlangıç sayfasındaki \"Yeni proje başlat\" listesini kaydırmak listenin sonundan ötesini okuyabiliyordu; bu, Windows'ta bildirilen bir çökmenin olası nedeniydi ve artık olmuyor.",
+"u.0.1.31.2.f1": "Bir eklenti penceresinin klavye düğmesi \"önce LYNX\" durumundayken (\"Eklentinin tuş basışlarını ana uygulamadan önce işlemesine izin ver\" kapalı), klavyeden piyano artık tuşlarını yerleştirilmiş bir VST3 eklentisinden önce alıyor.",
+"u.0.1.31.2.f2": "\"Uzatılmış pattern klipleri pattern'lerini döngüler\" açıkken bir klibin ilk ölçüsünden sonra çizilen, yapıştırılan veya taşınan notalar duyuluyor: pattern onları içerecek kadar uzuyor.",
+"u.0.1.31.2.f3": "Playlist › \"Otomasyon kliplerini parçalarının şeritlerine taşı\" kliplerin çaldığı değerleri büyük FL projelerinde de koruyor.",
+"u.0.1.31.2.f4": "\"Kısayolları yönet\" artık yeni pencereleri geç etkinleştiren masaüstlerinde imleç arama kutusunda açılmalı (#244; yalnızca simülasyonla test edildi); Seçenekler › Klavyeden piyano ayarları her pencere boyutunda Kök nota / Oktav / Düzen menüsünü açıyor (#270).",
+"u.0.1.31.2.f5": "FL Studio'ya dışa aktarma, bu bilgisayarda olmayan bir proje veri klasörünü yazmıyor (FL 2026 \"Invalid project data folder\" hatasında duruyordu); Browser'da tıklanan yerleşik bir synth'in FL preset'i o synth'i preset ile açıyor (#288); Playlist'e bırakılan MIDI dosyaları varsayılan olarak pattern klibine dönüşüyor (#287)."
 }

@@ -136,9 +136,10 @@ TEST (flfacts190gw_fl_default_row_is_48)
             if (t.index == 1)
                 size1 = t.heightScale;
     CHECK (std::abs (size1 - 2.0f) < 1.0e-6f);
-    // ...and FL opens it at 200 % of its own 48 px row
+    // ...and FL opens it at 200 % of the row the export writes in event 0xF2 (round 190oo PAT-6: the song's 38 px row
+    // goes through as FL's vertical zoom 11; before, every export opened on FL's 48 px row and this row was 80 px)
     const auto back = importFlp (project);
-    CHECK (back.playlistRowHeight == 48 && back.playlistTracks.size() >= 2 && back.playlistTracks[1].height == 80);
+    CHECK (back.playlistRowHeight == 38 && back.playlistTracks.size() >= 2 && back.playlistTracks[1].height == 60);
 }
 
 TEST (flfacts190gw_mixer_insert_multiple_range)
@@ -222,12 +223,12 @@ TEST (flfacts190gw_clip_menu_items)
 {
     using namespace lynx;
     // B3: Pitch-correct / Time-warp sample (LYNX's Newtone / Newtime), Crossfade with (enabled when there is a clip to
-    // crossfade with); Deverb stays out (FL 2026 only offers a download there)
+    // crossfade with); round 190jv: Deverb shown as in FL's menu (LYNX's own Deverb; FL 2026 only offers a download there)
     const auto all = flclipmenu::shown (false, false);
     const auto has = [&all] (const char* text) {
         return std::any_of (all.begin(), all.end(), [text] (const flclipmenu::Entry& e) { return e.text == text; });
     };
-    CHECK (has ("Pitch-correct sample") && has ("Time-warp sample") && has ("Crossfade with") && ! has ("Deverb"));
+    CHECK (has ("Pitch-correct sample") && has ("Time-warp sample") && has ("Crossfade with") && has ("Deverb"));
 
     // Newtone / Newtime on the Master: a new one in the first empty slot, the sample loaded; the same slot next time
     auto song = Song::makeDefault();

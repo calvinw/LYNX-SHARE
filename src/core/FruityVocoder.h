@@ -62,6 +62,9 @@ struct State
 std::optional<State> parse (const std::vector<std::uint8_t>& data);
 std::vector<std::uint8_t> serialise (const State& s);
 bool validBands (int n) noexcept;
+// round 190oa (DP-33, capture 190oa C7: FL's band hint "Band 2 - 92Hz  100%"): analysis band `band`'s centre (Hz), as the
+// engine's bank places it from FreqMin / FreqMax / FreqScale
+float bandHz (const State& s, int band) noexcept;
 
 // Frequency (Hz) of FreqMin / FreqMax for a raw control value, as the plugin computes it.
 float edgeHz (int raw) noexcept;
@@ -80,6 +83,12 @@ public:
     void process (const float* mod, const float* car, float* out, int n) noexcept;
     // FL's own I/O: stereo in place, L = modulator and R = carrier (or swapped), mono result on both sides
     void processStereo (float* left, float* right, int n) noexcept;
+    // round 190ld (DP-32): analysis band k's envelope over the bank's common gain (the modulator's band level times the
+    // band's own level; 1 = 0 dB), as the editor's band display shows it. Frozen while HOLD is on, as the envelopes are.
+    float bandMeter (int k) const noexcept
+    {
+        return k >= 0 && k < st.bands && bandGain > 0.0f ? analysis[(std::size_t) k].env / bandGain : 0.0f;
+    }
 
 private:
     struct Biquad

@@ -136,11 +136,45 @@ struct Stats
 {
     std::atomic<std::uint64_t> blocks { 0 }, fromRing { 0 }, waited { 0 }, inline_ { 0 }, flushes { 0 }, drains { 0 },
         engagements { 0 }, partitionChanges { 0 }, promoted { 0 }, splitMismatches { 0 }, statesSwapped { 0 }, backoffs { 0 },
-        probes { 0 }, keptOn { 0 }, keptOff { 0 };
+        probes { 0 }, keptOn { 0 }, keptOff { 0 },
+        keptForOverruns { 0 }; // (perfgate190id: kept on by favourFewerOverruns alone, not by a CPU win)
     // the last probe: the rack's CPU (% of a core) and overruns per minute, render-ahead off and on
     std::atomic<float> probeCpuOff { 0.0f }, probeCpuOn { 0.0f }, probeOverOff { 0.0f }, probeOverOn { 0.0f };
     std::atomic<int> aheadChannels { 0 }, aheadTracks { 0 }, boundary { 0 }, window { 0 };
     std::atomic<bool> engaged { false };
+    // Round 190of (P24, the split CPU meter, like Cubase 14's real-time / prefetch figures): the device callback's own
+    // time in the renderers (the live part, and whatever it had to render of the ahead part itself), the render-ahead
+    // thread's rendering time, and the audio they were for, in ns, counted up while playing or stopped (readers take
+    // differences: share of real time = time / audio)
+    std::atomic<std::uint64_t> liveNs { 0 }, aheadNs { 0 }, audioNs { 0 };
+};
+
+// Round 190of (P24): the split CPU meter's figures between two readings of Stats: the live part and the part rendered
+// ahead as shares of real time (1 = one core for the whole time the audio lasts). Any thread.
+struct SplitLoad
+{
+    double live = 0.0, ahead = 0.0;
+    bool valid = false; // false: no audio was rendered since the last reading
+};
+class SplitLoadReader
+{
+public:
+    SplitLoad take (const Stats& stats) noexcept
+    {
+        const auto live = stats.liveNs.load (std::memory_order_relaxed), ahead = stats.aheadNs.load (std::memory_order_relaxed),
+                   audio = stats.audioNs.load (std::memory_order_relaxed);
+        SplitLoad out;
+        if (audio > lastAudio && live >= lastLive && ahead >= lastAhead)
+        {
+            const auto span = (double) (audio - lastAudio);
+            out = { (double) (live - lastLive) / span, (double) (ahead - lastAhead) / span, true };
+        }
+        lastLive = live, lastAhead = ahead, lastAudio = audio;
+        return out;
+    }
+
+private:
+    std::uint64_t lastLive = 0, lastAhead = 0, lastAudio = 0;
 };
 } // namespace renderahead
 
@@ -188,10 +222,14 @@ public:
     // the touched / released automation slots (RackRenderer::setOverriddenSlots / setReleasedSlots) reach both renderers
     void setOverriddenSlots (const std::vector<int>& slots) noexcept;
     void setReleasedSlots (const std::vector<int>& slots) noexcept;
+    void setKeepReleasedOnPlay (bool keep) noexcept; // (round 190oa, DL-58: both renderers)
     void setProfiling (bool on) noexcept;
     // The render-ahead thread renders nothing more (the engine is going away: its snapshots are about to be freed);
     // returns once it is idle. prepare() lets it work again.
     void halt() noexcept;
+    // Round 190jb: after a halt() while the engine lives on (an export rendered with its plugins): the thread may
+    // render again. The device callback must not be running (the engine's export hold keeps it out).
+    void resume() noexcept { halted.store (false, std::memory_order_seq_cst); }
 
     // the partition of a state (tests): [channel] / [track] 1 = rendered ahead; false = nothing to render ahead.
     // `editors` (optional): the open editors' wants (levelWanted, metersWanted, the analyser's key) to partition with
@@ -199,6 +237,15 @@ public:
     static bool partitionOf (const RackState& state, const int* liveChannels, int liveChannelCount, const int* liveTracks, int liveTrackCount,
                              const LiveInput* input, std::vector<char>& aheadChannels, std::vector<char>& aheadTracks, int& boundary,
                              const ProcessTimes* editors = nullptr);
+
+    // The probe's verdict (round perfgate190id, the engagement rule as a function for tests): from the rack's CPU share
+    // (of a core) and the overruns per second measured with render-ahead off and on. `forOverruns`: kept by
+    // favourFewerOverruns (fewer overruns for some more CPU), not by a CPU win.
+    struct ProbeVerdict
+    {
+        bool keep = false, forOverruns = false;
+    };
+    static ProbeVerdict probeVerdict (double cpuShareOff, double cpuShareOn, double overRateOff, double overRateOn) noexcept;
 
 private:
     struct Entry;
@@ -230,6 +277,11 @@ private:
     // Owner decision for 0.1.28 (rollup step 9): on by default — synth100-type projects keep render-ahead (its probe:
     // 340 -> 20 overruns / min at equal CPU); 190gq had it off (no project worse in any measure)
     static constexpr bool favourFewerOverruns = true;
+    // Owner decision for 0.1.30 (round perfgate190id, recommended option): with at least 4x fewer overruns
+    // (probeMuchFewer) up to probeCpuMarginMuchFewer (+5 %) more CPU is accepted. On a loaded machine the probe measured
+    // synth100 at 64 samples going from 29438 to 1429 overruns / min at +2.5 % CPU, and the +2 % margin kept it off.
+    // Fewer dropouts matter more than a little CPU.
+    static constexpr double probeMuchFewer = 0.25, probeCpuMarginMuchFewer = 1.05;
     static constexpr int probeRounds = 2;
     double probeLeft = 0.0, decidedLeft = 0.0, warmupLeft = 0.0;
     int probeRound = 0;

@@ -82,6 +82,7 @@ enum class Target
     leftEdge,    // left edge of a note / clip
     rightEdge,   // right edge of a note / clip
     fadeHandle,  // Playlist: fade handle of an audio clip
+    fadeTension, // Playlist: the tension handle (circle) on an audio clip's fade (FL 2026, round 190jz)
     gainHandle,  // Playlist: an audio clip's gain handle (bottom centre, FL 2026; round 166e)
     autoPoint,   // Playlist: a point of an inline automation curve
     autoCurve,   // Playlist: on an automation curve (a click adds a point)
@@ -119,6 +120,7 @@ enum class Action
     zoomRange,
     listen,
     fade,         // drags an audio fade
+    fadeTension,  // drags an audio fade's tension up / down (round 190jz)
     clipGain,     // drags an audio clip's gain up / down
     movePoint,    // drags an automation point
     addPoint,     // adds an automation point on the curve
@@ -168,6 +170,8 @@ inline Action leftAction (EditTool tool, Target target, Mods mods, bool playlist
             return Action::addPoint;
         if (target == Target::fadeHandle)
             return Action::fade;
+        if (target == Target::fadeTension)
+            return Action::fadeTension;
         if (target == Target::gainHandle)
             return Action::clipGain;
         if (mods.alt && mods.shift && target == Target::item)
@@ -181,6 +185,7 @@ inline Action leftAction (EditTool tool, Target target, Mods mods, bool playlist
         case Target::autoCurve:
         case Target::autoTension:
         case Target::fadeHandle:
+        case Target::fadeTension:
         case Target::gainHandle: return mods.shift ? Action::copyMove : Action::move;
         case Target::rightEdge: return Action::resizeRight;
         case Target::leftEdge: return Action::resizeLeft;
@@ -224,7 +229,8 @@ inline Cursor cursorFor (Action action, EditTool tool)
         case Action::resizeRight:
         case Action::resizeLeft:
         case Action::fade: return Cursor::resizeH;
-        case Action::clipGain: return Cursor::resizeV;
+        case Action::clipGain:
+        case Action::fadeTension: return Cursor::resizeV;
         case Action::slipContent: return Cursor::slip;
         case Action::toggleSelect:
         case Action::boxSelect: return Cursor::select;
@@ -295,6 +301,22 @@ inline WheelDelta normaliseWheel (double deltaX, double deltaY, bool smooth, boo
         return { deltaX, deltaY, smooth };
     return { deltaX / windowsWheelNotch / 7.0, deltaY / windowsWheelNotch / 7.0, true };
 }
+
+// --- the horizontal wheel (issue #254, round 190ou) ---------------------------------------------------------------
+// One notch of a tilt wheel or of a mouse's second (horizontal) wheel: Windows' WM_MOUSEHWHEEL, X11's buttons 6 / 7
+// (JUCE patch fix 49), a mouse's horizontal wheel on macOS. It comes as deltaX alone and not smooth. A trackpad's
+// sideways swipe is smooth and keeps its own path, and macOS turns Shift+wheel into deltaX with Shift held: that stays
+// Shift+wheel. +1 = a notch to the right (the view goes later), -1 to the left, 0 = not a horizontal wheel's notch.
+inline int horizontalWheelNotch (double deltaX, double deltaY, bool smooth, bool shift) noexcept
+{
+    if (smooth || shift || deltaY != 0.0 || deltaX == 0.0)
+        return 0;
+    return deltaX < 0.0 ? 1 : -1; // (JUCE: a tilt to the right is a negative deltaX, as on a trackpad)
+}
+
+// FL 2026 (round 190ou, Thief: the Playlist at 15.5 px a bar and the Piano roll at 384 px a bar): a notch of the
+// horizontal wheel moves the view 1.5 beats, whatever the zoom
+constexpr double horizontalWheelBeats = 1.5;
 
 // The zoom factor of one trackpad pinch event (macOS magnifyWithEvent, Windows GID_ZOOM: JUCE's mouseMagnify `scale`,
 // 1 = no change), limited so that one event never jumps more than x2.
@@ -421,6 +443,23 @@ inline float keyClickVelocity (double along, double length)
     if (length <= 0.0)
         return 0.8f;
     return (float) std::clamp ((along + 1.0) / length, 1.0 / 127.0, 1.0);
+}
+
+// Issue #183: whether the Piano roll sounds a note the mouse places, drags, resizes or edits. While the song or pattern
+// plays it doesn't (FL leaves the notes you draw to the playback; the Channel rack's step clicks are silent either way),
+// unless the Piano roll's "Preview notes while playing" is on (LYNX's, off by default). Clicks on the Piano roll's own
+// keyboard always sound: they play the instrument, they don't edit a note.
+constexpr bool previewsEditedNote (bool playing, bool previewWhilePlaying) noexcept
+{
+    return ! playing || previewWhilePlaying;
+}
+
+// Round 190jd (FL 2026, live check 190iw Q1): pressing the mouse on an existing note sounds it only for a grab of a note
+// that was not selected (a move); a press on a note edge (resize, left or right) and a grab of an already-selected note
+// are silent. Placing a new note and the key changes of a drag still sound (previewsEditedNote decides the transport part).
+constexpr bool previewsGrabbedNote (bool resizeEdge, bool wasSelected) noexcept
+{
+    return ! resizeEdge && ! wasSelected;
 }
 
 // Alt+wheel over a note: the property moves by 4/127 per notch (Ctrl+Alt: 1/127), clamped to 0..1.

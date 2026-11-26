@@ -18,6 +18,8 @@
 
 #include "core/MixerOps.h"
 #include "core/NoteEdit.h"
+#include "core/Sections.h"
+#include "core/ChordLane.h"
 #include "core/Song.h"
 
 namespace lynx::arrange
@@ -199,6 +201,7 @@ struct TimeClip
         std::vector<AutomationPoint> points; // from the range's start, with a point on each edge
     };
     std::vector<Lane> lanes;
+    std::vector<SongChord> chords; // round 190pf: the Chord lane's chords of the range, from its start
     std::int64_t length = 0;
     bool empty() const noexcept { return length <= 0; }
 };
@@ -225,6 +228,7 @@ inline TimeClip copyTime (const Song& song, std::int64_t from, std::int64_t to)
     for (const auto a : laneAutomations (song))
         if (auto points = detail::piece (song.automations[(std::size_t) a].points, from, to); ! points.empty())
             out.lanes.push_back ({ a, std::move (points) });
+    out.chords = chordlane::piece (song.chords(), from, to); // (round 190pf: the Chord lane goes with its time)
     return out;
 }
 
@@ -235,6 +239,9 @@ inline void pasteTime (Song& song, std::int64_t at, const TimeClip& time)
         return;
     noteedit::sliceInsertTime (song.playlist, song.markers(), at, time.length);
     insertLaneTime (song, at, time.length);
+    sections::insertTime (song.sections(), at, time.length); // (round 190ol: the Sections lane follows)
+    chordlane::insertTime (song.chords(), at, time.length);   // (round 190pf: the Chord lane too)
+    chordlane::pastePiece (song.chords(), at, time.chords);
     for (auto c : time.clips)
     {
         const auto valid = c.kind == ClipKind::pattern   ? c.pattern >= 0 && c.pattern < (int) song.patterns.size()
@@ -263,6 +270,8 @@ inline void deleteTime (Song& song, std::int64_t from, std::int64_t to)
         return;
     noteedit::deleteTime (song.playlist, song.markers(), from, to);
     deleteLaneTime (song, from, to);
+    sections::deleteTime (song.sections(), from, to); // (round 190ol: the Sections lane follows)
+    chordlane::deleteTime (song.chords(), from, to);  // (round 190pf: the Chord lane too)
 }
 
 // Cut Time: Copy Time, then Delete Time.
@@ -371,7 +380,8 @@ inline int carryLaneAutomation (Song& song, int track, std::int64_t from, std::i
 
 // --- A track group as a bus -------------------------------------------------------------------------------------------
 
-// The header of the group `track` belongs to, and its last member; {-1, -1} when the track is in no group.
+// The header of the group `track` belongs to, and its last member; {-1, -1} when the track is in no group. Round 190jf:
+// the innermost folder (a header's own folder, else its parent's); with one level of groups the same as FL's group.
 struct Group
 {
     int header = -1, last = -1;
@@ -379,15 +389,12 @@ struct Group
 };
 inline Group groupOf (const Song& song, int track)
 {
-    const auto& tracks = song.playlistTracks;
-    if (track < 0 || track >= (int) tracks.size())
+    if (track < 0 || track >= (int) song.playlistTracks.size())
         return {};
-    auto header = track;
-    while (header > 0 && tracks[(std::size_t) header].grouped)
-        --header;
-    auto last = header;
-    while (last + 1 < (int) tracks.size() && tracks[(std::size_t) last + 1].grouped)
-        ++last;
+    const auto header = noteedit::groupHeaderOf (song, track);
+    if (header < 0)
+        return {};
+    const auto last = noteedit::folderEnd (song, header);
     return last > header ? Group { header, last } : Group {};
 }
 
@@ -405,6 +412,18 @@ inline int insertOf (const Song& song, int track)
     return insert > 0 && insert < (int) song.mixer.size() ? insert : -1;
 }
 
+// Round 190jf: the tracks whose inserts sum into a folder's bus: its direct members, and the members of a sub-folder
+// whose header has no insert of its own (a sub-folder with one plays into the bus through it).
+inline void busMembers (const Song& song, int header, std::vector<int>& out)
+{
+    for (const auto c : noteedit::folderChildren (song, header))
+    {
+        out.push_back (c);
+        if (noteedit::isGroupHeader (song, c) && insertOf (song, c) <= 0)
+            busMembers (song, c, out);
+    }
+}
+
 // The bus of the group `track` belongs to: the header's insert, when every member insert plays only into it. -1 = none.
 inline int groupBus (const Song& song, int track)
 {
@@ -415,7 +434,9 @@ inline int groupBus (const Song& song, int track)
     if (bus <= 0)
         return -1;
     int members = 0;
-    for (int t = g.header + 1; t <= g.last; ++t)
+    std::vector<int> tracks;
+    busMembers (song, g.header, tracks);
+    for (const auto t : tracks)
         if (const auto i = insertOf (song, t); i > 0 && i != bus)
         {
             const auto& m = song.mixer[(std::size_t) i];
@@ -435,8 +456,9 @@ inline int makeGroupBus (Song& song, int track)
     const auto g = groupOf (song, track);
     if (! g.valid())
         return -1;
-    std::vector<int> members;
-    for (int t = g.header + 1; t <= g.last; ++t)
+    std::vector<int> members, tracks;
+    busMembers (song, g.header, tracks);
+    for (const auto t : tracks)
         if (const auto i = insertOf (song, t); i > 0 && std::find (members.begin(), members.end(), i) == members.end())
             members.push_back (i);
     if (members.empty())

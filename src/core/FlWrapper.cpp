@@ -203,6 +203,10 @@ void applyFlWrapperOptions (const ForeignPlugin& w, PluginRef& ref)
         ref.resetOnFlush = (w.wrapperFlags & 0x02000000u) == 0;
         // the window's Typing keyboard priority button off [DATA round 187a: kb-on.flp / kb-off2.flp, 0xB4007D8C -> 0xB5007D8C]
         ref.hostKeysFirst = (w.wrapperFlags & 0x01000000u) != 0;
+        // Settings › GUI (round 190oh [DATA: FL 2026 saves with each box toggled, 0xB4007D8C -> 0xB0007D8C / 0xF4007D8C]):
+        // 0x04000000 "DPI aware", 0x40000000 "Scale editor dimensions"
+        ref.dpiAware = (w.wrapperFlags & 0x04000000u) != 0;
+        ref.scaleEditorDimensions = (w.wrapperFlags & 0x40000000u) != 0;
         if (w.hasWrapperFlags2)
         {
             ref.allNotesOffOnStop = (w.wrapperFlags2 & 0x1000u) == 0;
@@ -407,11 +411,17 @@ const std::vector<WrapperOption>& wrapperOptions()
         // issue #108 (a LYNX addition; FL's wrapper has no MPE switch): beside the other per-note MIDI options
         { "MIDI", "MPE", "MIDI Polyphonic Expression: each note on its own MIDI channel with its fine pitch, Mod X (timbre) and Mod Y (pressure)", &PluginRef::mpe, true, false },
         { "MIDI", "Send All Notes Off when playback stops", "Off: only the notes still held get their note off", &PluginRef::allNotesOffOnStop, true, false },
+        // GitHub #198 (round 190ks; a LYNX addition): the notes the plugin plays from its own window are recorded
+        { "MIDI", "Record notes from the plugin window", "While recording, the notes the plugin plays from its own window (pads or keys clicked in it) are recorded on its channel", &PluginRef::recordOwnNotes, false, false },
         { "Compatibility", "Reset plugin when LYNX resets", "Reset the plugin before an export and on panic (clears its tails and held notes)", &PluginRef::resetOnFlush, true, false },
         { "Compatibility", "Send loop position", "Let the plugin know about loop start and end points", &PluginRef::sendLoopPosition, true, false },
         { "Compatibility", "Use fixed size buffers", "Constant 2 ms blocks, for plugins that need equal buffers (adds latency)", &PluginRef::fixedBuffers, true, false },
         { "Compatibility", "Process maximum size buffers", "With fixed size buffers: the whole device buffer instead of 2 ms blocks", &PluginRef::maxSizeBuffers, true, true },
         { "Compatibility", "Use maximum buffer size from host", "With fixed size buffers: prepare the plugin for the host's largest block", &PluginRef::hostMaxBuffer, true, true },
+        // round 190oh (P3): Settings › GUI, FL's two scaling boxes (Fruity Wrapper's DFM: captions and hints [DATA]);
+        // a change reloads the plugin / closes its editor, as FL's "(requires reloading the plugin)" says
+        { "GUI", "DPI aware (requires reloading the plugin)", "For plugins that appear too big or small", &PluginRef::dpiAware, true, false },
+        { "GUI", "Scale editor dimensions", "Scale dimensions of plugins that appear cut-off on a high resolution screen", &PluginRef::scaleEditorDimensions, true, false },
     };
     return options;
 }

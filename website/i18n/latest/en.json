@@ -1,5 +1,10 @@
 {
-"u.0.1.29.t": "Fix release for 0.1.28: Go back to the previous version works",
-"u.0.1.29.s": "A small fix release for 0.1.28. Help › Go back to the previous version now installs the version you had before, and an older version you go back to no longer offers the newer one again right away.",
-"u.0.1.29.b0": "<strong>Help › Go back to the previous version</strong> (new in 0.1.28) offered 0.1.28 itself. It now installs the version you had before, with the same checksum check as an update, and the version you left is skipped by the automatic check."
+"u.0.1.31.2.t": "More fixes for 0.1.31",
+"u.0.1.31.2.s": "LYNX SHARE 0.1.31.2 fixes a likely cause of a start page crash, the &quot;LYNX first&quot; keyboard setting over docked VST3 plugins, stretched clips that looped their first bar, automation lanes made from FL projects, exported .flp files that FL refused, presets of FL's stock synths in the Browser and a few smaller issues.",
+"u.0.1.31.2.f0": "Scrolling the start page's &quot;Start a new project&quot; list could read past the end of its list, the likely cause of a crash reported on Windows; it no longer does.",
+"u.0.1.31.2.f1": "With a plugin window's keyboard button on &quot;LYNX first&quot; (&quot;Allow the plugin to handle keystrokes before the host does&quot; off), the typing keyboard now takes its keys before a docked VST3 plugin.",
+"u.0.1.31.2.f2": "With &quot;Stretched pattern clips loop their pattern&quot; on, notes drawn, pasted or moved past a clip's first bar are heard: the pattern grows to hold them.",
+"u.0.1.31.2.f3": "Playlist › &quot;Move automation clips into their tracks' lanes&quot; keeps the values the clips played, also on big FL projects.",
+"u.0.1.31.2.f4": "&quot;Manage shortcuts&quot; should now open with the caret in its search box on desktops that activate new windows late (#244; tested by simulation only); Options › Typing keyboard settings opens the Root note / Octave / Layout menu on any window size (#270).",
+"u.0.1.31.2.f5": "Export to FL Studio leaves out a project data folder that isn't on this computer (FL 2026 stopped at &quot;Invalid project data folder&quot;); an FL preset of a stock synth clicked in the Browser opens that synth with the preset (#288); MIDI files dropped on the Playlist become pattern clips by default (#287)."
 }

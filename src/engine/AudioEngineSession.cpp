@@ -3,12 +3,16 @@
 // clip and sends it on into loop playback. docs/analise/REA_rodada190bv.md says what follows the studied program.
 
 #include "engine/AudioEngine.h"
+#include "core/AutomationModes.h" // round 190pa (P21)
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include "core/DetailChain.h"
 #include "core/SessionOps.h"
+#include "core/LayoutStyle.h"
+#include "core/PlaylistOps.h"
 #include "ui/I18n.h"
 
 namespace lynx
@@ -217,10 +221,217 @@ void AudioEngine::readSlotTakeMessages()
     }
 }
 
+// --- round 190mx (GitHub #198): Session Record writes the moved parameters into the recorded clips' envelopes --------
+
+void AudioEngine::routeSessionAutomation (const AutomationTarget& target, std::vector<RecordedValue> points)
+{
+    if (points.empty())
+        return;
+    const auto holds = [&] (int track) { return detailchain::holds (detailchain::forTrack (song, track), target); };
+    // Live: a MIDI clip being recorded on the track of the device takes the moves into its envelopes
+    for (auto& take : slotTakes)
+        if (! take.audio && holds (take.track))
+        {
+            auto it = std::find_if (take.automation.begin(), take.automation.end(), [&] (const auto& a) { return a.first.target == target; });
+            if (it == take.automation.end())
+            {
+                AutomationWrite w;
+                w.target = target;
+                w.name = nameAutomation ? nameAutomation (target) : std::string ("Automation");
+                take.automation.push_back ({ w, {} });
+                it = take.automation.end() - 1;
+            }
+            it->second.insert (it->second.end(), points.begin(), points.end());
+            return;
+        }
+    // overdub: the clip an armed track plays
+    if (! sessionOverdub || clipLauncher == nullptr)
+        return;
+    for (const auto track : gridArmed)
+        if (track >= 0 && track < launcher::maxTracks && clipLauncher->tracks[(std::size_t) track].playing.load (std::memory_order_relaxed) >= 0
+            && std::none_of (slotTakes.begin(), slotTakes.end(), [track] (const SlotTake& t) { return t.track == track; }) && holds (track))
+        {
+            auto it = std::find_if (overdubAutomation.begin(), overdubAutomation.end(),
+                                    [&] (const OverdubAutomation& o) { return o.track == track && o.write.target == target; });
+            if (it == overdubAutomation.end())
+            {
+                OverdubAutomation o;
+                o.track = track;
+                o.write.target = target;
+                o.write.name = nameAutomation ? nameAutomation (target) : std::string ("Automation");
+                overdubAutomation.push_back (std::move (o));
+                it = overdubAutomation.end() - 1;
+            }
+            it->points.insert (it->points.end(), points.begin(), points.end());
+            return;
+        }
+}
+
+bool AudioEngine::sessionClipOf (const AutomationTarget& target, int& pattern, double& local, std::int64_t& end) const
+{
+    if (clipLauncher == nullptr || ! song.clipGrid || layoutstyle::current() != layoutstyle::Style::clipLaunch)
+        return false;
+    const auto now = slotClockNow();
+    for (int track = 0; track < launcher::maxTracks; ++track)
+    {
+        const auto& rt = clipLauncher->tracks[(std::size_t) track];
+        const auto scene = rt.playing.load (std::memory_order_relaxed);
+        if (scene < 0)
+            continue;
+        const auto* clip = launcher::clipAt (*song.clipGrid, track, scene);
+        if (clip == nullptr || clip->kind != ClipKind::pattern || clip->pattern < 0 || clip->pattern >= (int) song.patterns.size() || clip->length <= 0
+            || ! detailchain::holds (detailchain::forTrack (song, track), target))
+            continue;
+        auto at = std::fmod (now - rt.anchor.load (std::memory_order_relaxed), (double) clip->length);
+        if (at < 0.0)
+            at += (double) clip->length;
+        pattern = clip->pattern;
+        local = (double) clip->offset + at;
+        end = clip->offset + clip->length;
+        return true;
+    }
+    return false;
+}
+
+AudioEngine::AutomationCaptureResult AudioEngine::captureAutomation()
+{
+    AutomationCaptureResult result;
+    const auto gestures = captureauto::lastGestures (automationCapture.entries(), lastAutomationCaptureMs, 2 * std::max<std::int64_t> (1, song.barTicks()));
+    if (gestures.empty())
+        return result;
+    const auto style = layoutstyle::current();
+    const auto lanes = style != layoutstyle::Style::pattern || autolanes::shown();
+    double newest = lastAutomationCaptureMs;
+    const auto mode = automodes::fromInt (song.automationWriteMode); // (round 190pa, P21)
+    editSong ([&] (Song& s) {
+        for (const auto& g : gestures)
+        {
+            const auto& first = g.points.front();
+            AutomationWrite w;
+            w.target = g.target;
+            w.name = nameAutomation ? nameAutomation (g.target) : std::string ("Automation");
+            std::vector<RecordedValue> points;
+            for (const auto& p : g.points)
+            {
+                points.push_back ({ first.clipPattern >= 0 ? p.clipTick : p.tick, p.value });
+                newest = std::max (newest, p.ms);
+            }
+            result.points += (int) points.size();
+            ++result.controls;
+            // round 190pa (P21): Latch holds the gesture's last value to where its play pass stopped, Write also writes
+            // its first value from where the pass started (a grid clip's envelope keeps the gesture as it was)
+            if (first.clipPattern < 0)
+            {
+                const auto& last = g.points.back();
+                if (const auto* pass = automationCapture.pass (last.pass); pass != nullptr && automodes::holdsToEnd (mode) && pass->endTick > last.tick)
+                    points.push_back ({ pass->endTick, last.value });
+                if (const auto* pass = automationCapture.pass (first.pass); pass != nullptr && automodes::writesFromStart (mode) && pass->startTick < first.tick)
+                    points.insert (points.begin(), { pass->startTick, first.value });
+            }
+            const auto glide = [&] {
+                if (automodes::glidesBack (mode) && w.automation >= 0 && w.automation < (int) s.automations.size())
+                    glideBackToCurve (s.automations[(std::size_t) w.automation], w, automodes::returnTicks (s.bpm, ppq));
+            };
+            if (first.clipPattern >= 0 && first.clipPattern < (int) s.patterns.size()) // a grid clip played: its envelope
+                commitClipEnvelopePoints (s, first.clipPattern, w, std::move (points), first.clipEnd, 0);
+            else if (! first.songMode) // Pattern mode: the current pattern's events, as a take
+            {
+                const auto pattern = juce::jlimit (0, std::max (0, (int) s.patterns.size() - 1), s.currentPattern);
+                const auto loop = s.patterns.empty() ? ppq * 4 : s.patterns[(std::size_t) pattern].effectiveLength (s.meter());
+                if (! s.patterns.empty())
+                    commitEventPoints (s, pattern, w, std::move (points), loop, 0);
+            }
+            else if (lanes)
+            {
+                commitLanePoints (s, w, std::move (points), 0);
+                glide();
+            }
+            else
+            {
+                // (a new clip starts as one bar: it is made to reach the gesture's last bar, as a take's clip grows)
+                const auto last = songTickForRecorded (s, points.back().tick);
+                commitAutomationPoints (s, w, std::move (points), 0);
+                growTakeClip (s, w, last + 1, true);
+                glide();
+            }
+        }
+    });
+    lastAutomationCaptureMs = newest;
+    return result;
+}
+
+void AudioEngine::commitSessionAutomation()
+{
+    const auto grid = recordOptions.quantiseAutomation ? recordOptions.quantise : std::int64_t { 0 };
+    auto write = [this] (const std::function<void (Song&)>& edit) {
+        editSong (edit, ! sessionAutomationHasUndoStep);
+        sessionAutomationHasUndoStep = true;
+    };
+    // a recorded clip, once it exists: its own positions are the distance from where the recording began
+    for (auto& take : slotTakes)
+    {
+        if (take.audio || ! take.placed || take.automation.empty() || ! song.clipGrid)
+            continue;
+        const auto* clip = launcher::clipAt (*song.clipGrid, take.track, take.scene);
+        if (clip == nullptr || clip->kind != ClipKind::pattern || clip->pattern < 0 || clip->pattern >= (int) song.patterns.size())
+            continue;
+        const auto length = std::max<std::int64_t> (1, (std::int64_t) std::llround (take.until - take.from));
+        const auto pattern = clip->pattern; // (an edit may move the grid's clips)
+        for (auto& [w, points] : take.automation)
+        {
+            std::vector<RecordedValue> local;
+            for (const auto& p : points)
+                if (p.tick >= take.from && p.tick < take.until) // (after its end the clip plays: nothing more is taken)
+                    local.push_back ({ p.tick - take.from, p.value });
+            points.clear();
+            if (local.empty())
+                continue;
+            write ([&] (Song& s) { commitClipEnvelopePoints (s, pattern, w, std::move (local), length, grid); });
+        }
+    }
+    // overdub: where the playing clip's loop was when the control moved
+    if (overdubAutomation.empty() || clipLauncher == nullptr || ! song.clipGrid)
+        return;
+    for (auto& o : overdubAutomation)
+    {
+        if (o.points.empty())
+            continue;
+        const auto& rt = clipLauncher->tracks[(std::size_t) o.track];
+        const auto scene = rt.playing.load (std::memory_order_relaxed);
+        const auto* clip = scene >= 0 ? launcher::clipAt (*song.clipGrid, o.track, scene) : nullptr;
+        if (clip == nullptr || clip->kind != ClipKind::pattern || clip->pattern < 0 || clip->pattern >= (int) song.patterns.size() || clip->length <= 0)
+        {
+            o.points.clear(); // (the clip stopped: what was moved is dropped)
+            continue;
+        }
+        if (o.pattern != clip->pattern)
+        {
+            o.pattern = clip->pattern;
+            o.write.lastLocal = -1;
+        }
+        const auto anchor = rt.anchor.load (std::memory_order_relaxed);
+        const auto length = (double) clip->length;
+        std::vector<RecordedValue> local;
+        for (const auto& p : o.points)
+        {
+            auto at = std::fmod (p.tick - anchor, length);
+            if (at < 0.0)
+                at += length;
+            local.push_back ({ (double) clip->offset + at, p.value });
+        }
+        o.points.clear();
+        write ([&, pattern = clip->pattern, end = clip->offset + clip->length] (Song& s) {
+            commitClipEnvelopePoints (s, pattern, o.write, std::move (local), end, grid);
+        });
+    }
+}
+
 void AudioEngine::updateSlotRecording()
 {
     if (slotTakes.empty() && ! sessionOverdub && ! slotTaking.load (std::memory_order_relaxed))
     {
+        overdubAutomation.clear();
+        sessionAutomationHasUndoStep = false;
         if (clipLauncher != nullptr) // (nobody listening: the queue stays empty)
         {
             launcher::RecordedTake dropped;
@@ -309,6 +520,7 @@ void AudioEngine::updateSlotRecording()
             }, false);
         take.placedEvents = take.events.size();
     }
+    commitSessionAutomation(); // (round 190mx: the moved parameters into the clips placed above or playing)
     // a MIDI take is over once its end has passed and the keys held across it were released (or a moment later)
     slotTakes.erase (std::remove_if (slotTakes.begin(), slotTakes.end(),
                                      [&] (const SlotTake& t) { return ! t.audio && t.known && t.placed && (! playing || now > t.until + ppq / 2.0); }),

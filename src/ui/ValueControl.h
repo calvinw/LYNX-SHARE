@@ -33,6 +33,10 @@ struct ValueSpec
     std::function<juce::String (double)> toText;
     std::function<std::optional<double> (const juce::String&)> fromText;
     std::optional<AutomationTarget> target; // automatable: adds the automation / MIDI items
+    // the menu's "Type in value..." asks in other units (round 190mv, DF-22: FL's Master pitch asks for the tuning of A in
+    // Hz): that spec, and the conversions from / to this control's value. Empty = this spec.
+    std::shared_ptr<const ValueSpec> typeInSpec;
+    std::function<double (double)> toTypeIn, fromTypeIn;
 
     juce::String text (double value) const;
     std::optional<double> parse (const juce::String& typed) const;
@@ -77,6 +81,9 @@ private:
 // window passes it to AudioEngine::noteTweaked). Other controls call reportTweak themselves.
 extern std::function<void (const AutomationTarget&)> onTweak;
 void reportTweak (const ValueSpec& spec);
+
+// FL's value menu › "Set..." (round 190mv, DF-146): the big knob for fine adjusting, as a window's content
+std::unique_ptr<juce::Component> makeSetKnob (const ValueSpec& spec, double current, std::function<void (double)> set);
 
 // Alt+left-click or middle-click.
 bool isResetClick (const juce::MouseEvent& e) noexcept;
@@ -133,6 +140,10 @@ struct Hint
     juce::String value;        // its current value ("" if none)
     bool automatable = false;  // can be automated / linked to MIDI
     bool hasMenu = false;      // right-click opens a menu
+    // round 190oa (DF-45, FL manual "Icon display" + capture 190oa A3): FL's status icon beside the hint — a red circle
+    // with "!" on a hint that asks for attention ("Waiting for input..."), a piano keyboard on a played note's hint
+    enum class Mark : std::uint8_t { none, warning, note };
+    Mark mark = Mark::none;
 
     bool isEmpty() const noexcept { return text.isEmpty() && value.isEmpty(); }
 };

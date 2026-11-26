@@ -21,10 +21,12 @@
 #include "core/RemotePlugins.h"
 #include "core/PluginHold.h"
 #include "core/Instruments.h"
+#include "core/OwnNotes.h"
 #include "core/MidiControls.h"
 #include "core/Mpe.h"
 #include "core/Vfx.h"
 #include "core/ModuleWarmup.h"
+#include "core/GeneratorSmartDisable.h"
 
 namespace lynx
 {
@@ -83,6 +85,9 @@ public:
     bool takePending() noexcept { return pending.exchange (false, std::memory_order_acq_rel); }
     bool take (int index, float& value) noexcept;
     int size() const noexcept { return count; }
+    // Round 190ox: while a state is captured with the modulated parameters at their base, the audio thread's values wait
+    void hold (bool on) noexcept { holding.store (on, std::memory_order_release); }
+    bool held() const noexcept { return holding.load (std::memory_order_acquire); }
 
 private:
     struct Value
@@ -94,6 +99,7 @@ private:
     std::unique_ptr<Value[]> values;
     std::atomic<bool> pending { false };
     std::atomic<std::uint32_t> restoreEpoch { 1 };
+    std::atomic<bool> holding { false };
 };
 
 // A hosted plugin's audio outputs as FL's wrapper lists them in Processing › Connections (round 188d, issue #114):
@@ -124,6 +130,40 @@ struct HostedOptions
     }
 };
 
+// Round 190jg (sample-accurate automation, engine/TimedParameters.h): a hosted plugin's parameter changes inside the
+// chunk being rendered, kept by its adapter. The renderer adds them before the chunk's blocks (audio thread, the
+// renderer's); each block of the plugin then publishes its own on the thread while it runs (Scope).
+class TimedParameterQueue
+{
+public:
+    static constexpr int capacity = 512;
+    // whether this plugin can take them: CLAP or VST3, in LYNX's process or a separate one (not the 32-bit bridge)
+    static bool supports (const juce::AudioPluginInstance& plugin);
+    void add (int index, float value, int offset) noexcept;
+    // the changes in [from, from + count) of the current chunk (offsets made relative to `from`) published for one
+    // plugin block; the earlier ones are dropped. A new chunk (another chunk count) drops what is left of the last one.
+    class Scope
+    {
+    public:
+        Scope (TimedParameterQueue& queue, int from, int count) noexcept;
+        ~Scope();
+        Scope (const Scope&) = delete;
+        Scope& operator= (const Scope&) = delete;
+    private:
+        int previousCount;
+        const int *previousIndices, *previousOffsets;
+        const float* previousValues;
+    };
+
+private:
+    std::uint64_t chunk = 0;
+    int count = 0;
+    std::array<int, capacity> indices {}, offsets {};
+    std::array<float, capacity> values {};
+    std::array<int, capacity> blockIndices {}, blockOffsets {};
+    std::array<float, capacity> blockValues {};
+};
+
 class PluginInstrument final : public Instrument
 {
 public:
@@ -150,6 +190,8 @@ public:
     void transportReset() noexcept override { panic(); }
     void render (float* left, float* right, int n, float gainLeft, float gainRight) noexcept override;
     void setParameter (int index, float value) noexcept override;
+    bool takesTimedParameters() const noexcept override { return timedOk && fixed == nullptr && sampleAccurateAutomation(); }
+    void setParameterAt (int index, float value, int offset) noexcept override { timed.add (index, value, offset); }
     float parameterValue (int index) const noexcept override;
     int latencySamples() const noexcept override
     {
@@ -161,6 +203,9 @@ public:
     bool hasCrashed() const noexcept { return crashed.load (std::memory_order_relaxed); }
     // The plugin's state for saving (base64, as capturePluginState), or nullopt after a crash (keep the saved one).
     std::optional<std::string> captureState();
+    // Round 190ox: the same with these parameters at the values given (the modulated ones at their base: the saved state
+    // holds the user's value, not a moment of the modulation); the audio thread's changes wait meanwhile.
+    std::optional<std::string> captureState (const std::vector<std::pair<int, float>>& bases);
     // State restoration is serialized with this instance's processing by its callback lock (capture is not: it runs
     // beside processing, as on JUCE's own hosts; round 190ha).
     bool restoreState (const std::string& state);
@@ -168,6 +213,10 @@ public:
     void setParameterFromUi (int index, float value);
     void setRenderMode (bool offline);
     void resetForExport(); // UI thread, before an export (the audio is not running through it)
+    // Round 190jb: an export at another sample rate renders with this running instance (FL renders with the instances
+    // that play): the plugin is prepared again at `rate` (and back after the export). Message thread, while nothing
+    // processes it. False when it crashed or did not take the rate.
+    bool changeRate (double rate);
     bool usesFixedBlocks() const noexcept { return fixed != nullptr; }
     // The MIDI "parameters" (core/MidiControls.h): CC / aftertouch / pitch bend values last asked for.
     float midiControlValue (int index) const noexcept { return midiControls.value (index); }
@@ -176,6 +225,13 @@ public:
     void midiMessage (const std::uint8_t* bytes, int size) noexcept override { queueMidi (bytes, size); }
     void pitchBend (float) noexcept override {} // (the plugin takes the raw MIDI pitch bend, midiMessage)
     int takeMidiOutput (MidiOutNote* out, int max) noexcept override;
+    // round 190jl: the plugin's MIDI output to the hardware outputs on its wrapper output port (FL's Options › MIDI ›
+    // Output "Port"): every short channel message, at its sample in the chunk
+    void setHardwareMidi (bool on) noexcept override { hardwareOut = on; }
+    int takeHardwareMidi (HardwareMidi* out, int max) noexcept override;
+    // GitHub #198 (round 190ks): the notes the plugin plays from its own window, for a take (Instrument::takeOwnNotes)
+    void setRecordOwnNotes (bool on) noexcept override { recordOwn = on; }
+    int takeOwnNotes (OwnNote* out, int max) noexcept override;
     // Issue #14: the channel's PITCH knob, fine tune and main pitch reach the plugin as MIDI pitch bend (scaled by the
     // wrapper's pitch bend range), and a slide note bends the sounding notes to its key over its length
     void setLivePitch (float cents) noexcept override { livePitch = cents; }
@@ -190,11 +246,22 @@ public:
     const std::vector<PluginOutputInfo>& outputs() const noexcept { return outs; }
     void configure (const ChannelDef& channel, double bpm) noexcept override;
     void beginChunk (int n) noexcept override;
-    int auxOutputCount() const noexcept override { return anyAux.load (std::memory_order_relaxed) ? (int) outs.size() : 0; }
+    int auxOutputCount() const noexcept override { return anyAux.load (std::memory_order_acquire) ? (int) outs.size() : 0; }
     int auxOutputTrack (int k) const noexcept override;
     const float* auxOutputData (int k, int side) const noexcept override;
+    // Round 190ok (owner decision D2): FL's generator smart disable (core/GeneratorSmartDisable.h). With the channel's
+    // "Smart disable" on (ChannelDef::smartDisable, taken by configure), the wrapper's "Allow smart disable" and the
+    // global switch, the plugin sleeps after 4 s of silent output with nothing sent to it: idle() then tells the rack not
+    // to call it until a note or MIDI message comes.
+    bool idle() const noexcept override;
+    bool smartDisableActive() const noexcept { return smartOn.load (std::memory_order_relaxed); } // (tests)
+    bool sleeping() const noexcept { return idle(); }                                                // (tests)
 
 private:
+    std::atomic<bool> smartOn { false };
+    std::atomic<std::int64_t> smartHold { gensmart::holdSamples (44100.0) };
+    gensmart::State smart; // audio thread
+    void noteSmartBlock (int n, bool events, const float* const* channels, int numChannels) noexcept;
     void mixOutputs (const float* const* channels, int numChannels, int at, int count, float gl, float gr, float* left, float* right) noexcept;
     friend juce::String pluginStateContentionSelfTest();
     std::vector<PluginOutputInfo> outs;
@@ -219,6 +286,18 @@ private:
     bool producesMidi = false;
     std::array<MidiOutNote, 256> midiOut {};
     int midiOutCount = 0;
+    // round 190jl: the hardware outputs' copy (collectMidiOutput, with the block's start in the chunk)
+    bool hardwareOut = false;
+    std::array<HardwareMidi, 512> hardwareMidi {};
+    int hardwareMidiCount = 0, hardwareBlockAt = 0;
+    bool hardwarePositions = true; // false: a fixed block's events (their samples are the fixed block's, not the chunk's)
+    // GitHub #198 (round 190ks): the notes it sends on its own while a take records (collectMidiOutput); the echo guard
+    // keeps when each key's note on last went in (samplesSeen) and which keys' note ons were its own
+    bool recordOwn = false;
+    std::array<OwnNote, 256> ownNotes {};
+    int ownNoteCount = 0;
+    std::int64_t samplesSeen = 0;
+    ownnotes::EchoGuard echoGuard;
     HostedOptions options;
     std::atomic<bool> flVelocity { false };
     juce::uint8 midiVelocity (float velocity) const noexcept;
@@ -243,6 +322,8 @@ private:
     bool midiOverflow = false, recoveryMidi = false;
     HostBlockClock blockClock; // where each plugin block starts in the renderer's chunk (the play head's position)
 
+    TimedParameterQueue timed; // round 190jg
+    bool timedOk = false;
     std::unique_ptr<juce::AudioPluginInstance> plugin;
     mutable HostedParameterChanges parameterChanges;
     juce::AudioBuffer<float> buffer;
@@ -276,17 +357,25 @@ public:
     }
     void process (float* left, float* right, int n, const EffectParams& params, double bpm) noexcept override;
     void setParameter (int index, float value) noexcept override;
+    bool takesTimedParameters() const noexcept override { return timedOk && fixed == nullptr && sampleAccurateAutomation(); }
+    void setParameterAt (int index, float value, int offset) noexcept override { timed.add (index, value, offset); }
     float parameterValue (int index) const noexcept override;
     int latencySamples() const noexcept override
     {
         return crashed.load (std::memory_order_relaxed) ? 0 : plugin->getLatencySamples() + (fixed != nullptr ? fixed->latency() : 0);
     }
+    // Round 190jg: a CLAP plugin's declared tail (clap.tail) plus its latency, for smart disable (−1: none declared, or an
+    // infinite one: the fixed 4 s hold, as for every other plugin)
+    int tailSamples() const noexcept override;
 
     // The plugin crashed inside a call (caught by platform/CrashGuard.h): it is never called again, the slot plays
     // through (effect) or stays silent (instrument) and the UI is told (pluginCrashes()).
     bool hasCrashed() const noexcept { return crashed.load (std::memory_order_relaxed); }
     // The plugin's state for saving (base64, as capturePluginState), or nullopt after a crash (keep the saved one).
     std::optional<std::string> captureState();
+    // Round 190ox: the same with these parameters at the values given (the modulated ones at their base: the saved state
+    // holds the user's value, not a moment of the modulation); the audio thread's changes wait meanwhile.
+    std::optional<std::string> captureState (const std::vector<std::pair<int, float>>& bases);
     // State restoration is serialized with this instance's processing by its callback lock (capture is not: it runs
     // beside processing, as on JUCE's own hosts; round 190ha).
     bool restoreState (const std::string& state);
@@ -294,6 +383,10 @@ public:
     void setParameterFromUi (int index, float value);
     void setRenderMode (bool offline);
     void resetForExport(); // UI thread, before an export (the audio is not running through it)
+    // Round 190jb: an export at another sample rate renders with this running instance (FL renders with the instances
+    // that play): the plugin is prepared again at `rate` (and back after the export). Message thread, while nothing
+    // processes it. False when it crashed or did not take the rate.
+    bool changeRate (double rate);
     bool usesFixedBlocks() const noexcept { return fixed != nullptr; }
     // Round 177b: a plugin with a second input bus (its sidechain input) gets the slot's sidechain there; a slot without
     // one (or a silent source) feeds it silence, as before.
@@ -334,6 +427,10 @@ private:
     void flushMidiControls() noexcept;
     void findSideChannel() noexcept;
 
+    TimedParameterQueue timed; // round 190jg
+    bool timedOk = false;
+    bool declaresTail = false; // round 190jg: a CLAP plugin with clap.tail
+    double tailRate = 44100.0;
     std::unique_ptr<juce::AudioPluginInstance> plugin;
     mutable HostedParameterChanges parameterChanges;
     juce::AudioBuffer<float> buffer;
@@ -371,6 +468,8 @@ bool hasSideBus (const juce::AudioPluginInstance& plugin);
 // with fixed blocks: the slot's sidechain reaches the bus, and silence once the slot has none. "OK" or what failed.
 juce::String pluginSidechainSelfTest();
 juce::String pluginStateContentionSelfTest();
+// round 190ok (D2): FL's generator smart disable through PluginInstrument ("OK …" or "ERROR …")
+juce::String generatorSmartDisableSelfTest();
 
 // Plugin formats, known-plugin list (saved in AppData) and instance creation.
 // UI thread, except the scan functions (any thread; one scan at a time) and the background scan.
@@ -407,7 +506,13 @@ public:
     // in later scans. Incremental: files already listed and unchanged since are skipped.
     int scan (const juce::FileSearchPath& paths, const std::function<bool (float, const juce::String&)>& progress);
     // The same for a given list of plugin files (targeted scan).
-    int scanFiles (const juce::StringArray& files, const std::function<bool (float, const juce::String&)>& progress);
+    // (round 190ql: saveUnchanged false = plugins.xml is written only when the scan changed the list; the start-up's
+    // JSFX listing used to rewrite the whole file, ~0.5 MB with a large plugin list, at every start)
+    int scanFiles (const juce::StringArray& files, const std::function<bool (float, const juce::String&)>& progress, bool saveUnchanged = true);
+    // JSFX scripts (round 190pj, issue #241): writes the bundled pack when this build's is newer, then lists the scripts
+    // of the JSFX roots (Settings › File › JSFX folders) in this process — a header is read, nothing runs — and drops
+    // the listed scripts that are gone. Returns how many were added. Any thread (as the scans).
+    int scanJsfx();
 
     // Background scan of pluginFolders() (or `paths`): never blocks the caller; poll backgroundScan() for progress.
     struct ScanState
@@ -674,4 +779,11 @@ void preparePlugin (juce::AudioPluginInstance& plugin, double sampleRate, int bl
 
 // Current plugin state as base64 (for saving in the project).
 std::string capturePluginState (juce::AudioPluginInstance& plugin);
+
+// Round 190kx (engine/AraHost.cpp, ARA playback renderers): the song's play head as hosted generators see it (without
+// the loop), and one processBlock call under the plugin crash guard (non-zero: it crashed; `crashed` is then set and
+// the crash is recorded under `name`). Audio thread.
+juce::AudioPlayHead& songPlayHead();
+std::uint32_t processGuarded (juce::AudioPluginInstance& plugin, juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi,
+                              std::atomic<bool>& crashed, const std::string& name) noexcept;
 } // namespace lynx

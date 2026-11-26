@@ -49,4 +49,20 @@ juce::File localFile (const std::string& utf8Path);
 // starts LYNX again through the folder's 8.3 short name (plain ASCII), waits for it and returns true with its exit
 // code: the caller then quits. False (nothing done) when the path is ASCII, has no short name, or on other systems.
 bool relaunchFromAsciiPath (int& exitCode);
+
+// Test runs (round 190mo): a temp folder of this process alone, "<temp>/<prefix>-<random>", made the temp folder of
+// the process (TMPDIR on Linux / macOS, TMP and TEMP on Windows; child processes inherit it), so test runs at the same
+// time never share the fixed temp names their items use. Returns the folder (delete it when the run ends), or an
+// empty File when it could not be made (the system temp folder stays).
+juce::File useOwnTempFolder (const juce::String& prefix);
+
+// Test runs (round 190mo), Linux: the main thread's stack may grow to `bytes` (the soft RLIMIT_STACK, at most the hard
+// limit; the kernel checks it whenever the stack grows). The --selftest builds many AudioEngines (1.5 MB each) on the
+// main thread and came within 0.6 MB of the usual 8 MB. Does nothing elsewhere or when the limit is already higher.
+void allowMainThreadStack (std::size_t bytes);
+// When `file` was created (its birth time), in seconds since 1970 UTC; 0 when the file system does not keep one or the
+// file is missing (issue #231, round 190ns: Project info › Created of a project saved without a date). Windows: the
+// creation time; macOS: st_birthtime; Linux: statx's STATX_BTIME (ext4, Btrfs, XFS, tmpfs keep it; JUCE's
+// getCreationTime gives st_ctime there, the last change of the file's inode).
+double fileBirthSeconds (const juce::File& file);
 } // namespace lynx::platform

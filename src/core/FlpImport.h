@@ -32,7 +32,11 @@ struct FlpImportReport
 {
     std::map<std::string, int> converted;    // generators truly converted (3x Osc, FPC, DirectWave...)
     std::map<std::string, int> approximated; // approximated by the internal synth (MiniSynth, DX10...)
-    std::map<std::string, int> unsupported;  // no equivalent: play with a synth preset chosen by name
+    std::map<std::string, int> unsupported;  // instruments/generators with no equivalent: play with a synth preset chosen by name
+    // Round qafix190kq: everything else the import does not reproduce exactly (automation, clip and region data, grooves,
+    // scenes, MIDI / note effects, project info, a channel left silent...): left out or played differently. Before this
+    // round these lines were in `unsupported`, under the report's "played with a synth preset" heading.
+    std::map<std::string, int> notReproduced;
     std::map<std::string, int> droppedEffects; // effects with no equivalent (removed from the mixer)
     std::map<std::string, int> partialEffects; // effects kept but approximated or partly reproduced (still in the mixer)
     int missingSamples = 0;
@@ -74,6 +78,11 @@ struct FlpImportOptions
 // file exists become samplers; the rest use an internal instrument chosen
 // by name. Patterns are rescaled to our PPQ. Plugins not yet.
 Song importFlp (const flp::Project& project, const FlpImportOptions& options = {});
+
+// Round 190ov: the scale of an imported target link (Automation::Link::scale) for FL's value -> LYNX's `map` (the
+// control's own scale), sampled evenly over 0..1: empty when the map leaves every value alone, else the fewest points
+// (2, 3, 5 ... 1025) whose straight lines give the map within 1e-6 at 1025 sample points.
+std::vector<float> flLinkScale (const std::function<float (float)>& map);
 
 // An FL mixer track preset (.fst, flp::parseMixerPreset) as a LYNX mixer track: its effects (converted as an .flp
 // import does), level, pan, stereo separation, EQ, phase/swap, name ("" = the preset has none) and colour (0 = none).

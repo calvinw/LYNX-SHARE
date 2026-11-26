@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.22)
 # macOS: Big Sur or newer (universal builds pass -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"); set before project()
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
-project(LYNX VERSION 0.1.29 LANGUAGES C CXX)
+project(LYNX VERSION 0.1.31.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,6 +12,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # FMA; the exact FL engines rely on the plain operation order, as the Windows build compiles them)
 if(NOT MSVC)
     add_compile_options(-ffp-contract=off)
+endif()
+
+# Linux on ARM makes a plain `char` unsigned (x86 and Apple arm64: signed). The readers of FL's, Live's and the other
+# formats were written and tested with a signed char: Linux arm64 builds keep it (round 190oy)
+if(NOT MSVC AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    add_compile_options(-fsigned-char)
 endif()
 
 # FL Slayer's exact engine (x87 arithmetic under its own control word): with GCC 15 at -O1 and above, inlining in this
@@ -40,8 +46,15 @@ add_library(lynx_core STATIC
     src/core/Performance.cpp
     src/core/ClipLauncher.cpp
     src/core/SessionOps.cpp
+    src/core/TrackClips.cpp
+    src/core/TrackerGrid.cpp
+    src/core/ModuleImport.cpp
+    src/core/CrossPaste.cpp
+    src/core/TrackVersions.cpp
+    src/core/TrackImport.cpp
     src/core/RemoteMap.cpp
     src/core/DrawMode.cpp
+    src/core/AutoPointEdit.cpp
     src/core/Groove.cpp
     src/core/Patcherize.cpp
     src/core/Instruments.cpp
@@ -60,13 +73,22 @@ add_library(lynx_core STATIC
     src/core/AlsDevicesLot2.cpp
     src/core/AlsDevicesLot3.cpp
     src/core/AlsDevicesLot4.cpp
+    src/core/AlsDevicesLot5.cpp
     src/core/FlmFormat.cpp
     src/core/FlmImport.cpp
+    src/core/FlmExport.cpp
+    src/core/BandFormat.cpp
+    src/core/BandImport.cpp
+    src/core/BlxImport.cpp
+    src/core/RegionLoop.cpp
+    src/core/SmartControls.cpp
+    src/core/FactoryContent.cpp
     src/core/FlmEffects.cpp
     src/core/FlmNoteFx.cpp
     src/core/FlmDwSampler.cpp
     src/core/FlmSlicer.cpp
     src/core/AlsExport.cpp
+    src/core/DawProject.cpp src/core/ZipLite.cpp
     src/flp/FlpWrite.cpp
     src/core/Effects.cpp
     src/core/NoteEdit.cpp
@@ -75,11 +97,22 @@ add_library(lynx_core STATIC
     src/core/Comping.cpp
     src/core/Pdc.cpp
     src/core/WorkerPool.cpp
+    src/core/OverloadGuard.cpp
     src/core/TimeStretch.cpp
+    src/core/WarpEngines.cpp
     src/core/Arpeggiator.cpp
     src/core/SynthPresets.cpp
     src/core/Slicer.cpp
     src/core/AudioToMidi.cpp
+    src/core/PolyEdit.cpp
+    # PitchNet's polyphonic engine (round 190lk; AGPL-3.0, third_party/pitchnet-poly/README-LYNX.md)
+    third_party/pitchnet-poly/PolyEngine.cpp
+    third_party/pitchnet-poly/PolyExtraction.cpp
+    third_party/pitchnet-poly/PolyPurifier.cpp
+    third_party/pitchnet-poly/PolyRenderer.cpp
+    third_party/pitchnet-poly/PolySoundModel.cpp
+    third_party/pitchnet-poly/PolySpectral.cpp
+    third_party/pitchnet-poly/PolyLazy.cpp
     src/core/Templates.cpp
     src/core/FlWrapper.cpp
     src/core/FlPluginDb.cpp
@@ -101,7 +134,10 @@ add_library(lynx_core STATIC
     src/core/LoopStarter.cpp
     src/core/SimpleTracks.cpp
     src/core/SimplePads.cpp
+    src/core/SimpleSteps.cpp
     src/core/KeyFollow.cpp
+    src/core/LoopAnalysis.cpp
+    src/core/LoopKeywords.cpp
     src/core/GoalKnobs.cpp
     src/core/ChainPresets.cpp
     src/core/SoundLibrary.cpp
@@ -124,9 +160,21 @@ add_library(lynx_core STATIC
     src/core/DrumSynthLive.cpp
     src/core/Harmless.cpp
     src/core/Harmor.cpp
+    src/core/HarmorResynth.cpp
     src/core/Gms.cpp
     src/core/GmsMobile.cpp
     src/core/PocketSuperSaw.cpp
+    src/core/FmSynth.cpp
+    src/core/physmod/ModalBank.cpp
+    src/core/physmod/LynxModel.cpp
+    src/core/AlsDevicesFm.cpp
+    src/core/WavetableSynth.cpp
+    src/core/WavetableTables.cpp
+    src/core/WavetableUser.cpp
+    src/core/AlsDevicesWt.cpp
+    src/core/Braid.cpp
+    src/core/BraidParams.cpp
+    src/core/AlsDevicesLot6.cpp
     src/core/Morphine.cpp
     src/core/FruitKick.cpp
     src/core/BassDrum.cpp
@@ -236,6 +284,8 @@ add_library(lynx_core STATIC
     src/core/VoiceShift.cpp
     src/core/NativeEngines.cpp
     src/core/LynxBanks.cpp
+    src/core/HelixBank.cpp
+    src/core/LynxModelBank.cpp
     src/core/ModelParams.cpp
     src/core/ToxicBank.cpp
     src/core/BeepMapBank.cpp
@@ -256,10 +306,15 @@ add_library(lynx_core STATIC
     src/core/FlResampler.cpp
     src/core/FlKeys.cpp
     src/core/DirectWave.cpp
+    src/core/DirectWaveState.cpp
     src/core/OggVorbis.cpp
     src/core/BeepMap.cpp
     src/core/Sawer.cpp
     src/core/Inflate.cpp
+    src/core/SamplerImport.cpp
+    src/core/GigFile.cpp
+    src/core/Ncw.cpp
+    src/core/KontaktFile.cpp
     src/core/WavPack.cpp)
 target_include_directories(lynx_core PUBLIC src third_party/sse2neon)
 
@@ -289,6 +344,8 @@ target_sources(lynx_core PRIVATE
     src/core/EventEdit.cpp
     src/core/AudioEdit.cpp
     src/core/AudioEditTools.cpp
+    src/core/SampleProps.cpp
+    src/core/EdisonView.cpp
     src/core/FlAutoSlicer.cpp
     src/core/MixerOps.cpp
     src/core/History.cpp
@@ -311,6 +368,7 @@ target_sources(lynx_core PRIVATE
     src/core/PluginMonitor.cpp
     src/core/ProjectContents.cpp
     src/core/PlaylistOps.cpp
+    src/core/ModulatorExport.cpp
     src/core/QuickRender.cpp
     src/core/TempoDetect.cpp
     src/core/AutoWarp.cpp
@@ -342,6 +400,10 @@ target_sources(lynx_core PRIVATE
     src/core/ScriptDialog.cpp
     src/core/PianoRollScript.cpp)
 
+# JSFX scripts' identity, file policy and saved state (round 190pj, issue #241; core/Jsfx.h)
+target_sources(lynx_core PRIVATE
+    src/core/Jsfx.cpp)
+
 # pocketpy 2.2 (MIT; third_party/pocketpy, LYNX's changes marked "LYNX"): a small embeddable Python 3 interpreter,
 # sandboxed (no os module / files) and interruptible (the watchdog)
 add_library(pocketpy STATIC third_party/pocketpy/pocketpy.c)
@@ -351,12 +413,49 @@ set_target_properties(pocketpy PROPERTIES C_STANDARD 11)
 target_compile_options(pocketpy PRIVATE $<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>)
 target_link_libraries(lynx_core PUBLIC pocketpy)
 
+# ysfx 0.0.47 (Apache-2.0; third_party/ysfx at JoepVanlier/ysfx 5c3452fe, trimmed: no @gfx, no plugin; LYNX's changes
+# marked "LYNX"), with WDL's EEL2 (zlib-style; y.tab.c GPL-2+ with the Bison exception) and dr_libs (Unlicense / MIT-0):
+# the JSFX runtime behind engine/JsfxFormat.h (issue #241, round 190pj). Flags as ysfx's cmake.wdl.txt / cmake.ysfx.txt.
+set(YSFX_DIR third_party/ysfx)
+set(YSFX_WDL ${YSFX_DIR}/thirdparty/WDL/source/WDL)
+file(GLOB YSFX_SOURCES ${YSFX_DIR}/sources/ysfx*.cpp)
+add_library(lynx_ysfx STATIC ${YSFX_SOURCES} ${YSFX_WDL}/fft.c
+    ${YSFX_WDL}/eel2/nseel-caltab.c ${YSFX_WDL}/eel2/nseel-cfunc.c ${YSFX_WDL}/eel2/nseel-compiler.c ${YSFX_WDL}/eel2/nseel-eval.c
+    ${YSFX_WDL}/eel2/nseel-lextab.c ${YSFX_WDL}/eel2/nseel-ram.c ${YSFX_WDL}/eel2/nseel-yylex.c)
+if(WIN32)
+    target_sources(lynx_ysfx PRIVATE ${YSFX_WDL}/win32_utf8.c)
+endif()
+if(NOT MSVC)
+    # the GAS port of EEL2's x86-64 code generator (empty on other CPUs, which have theirs in nseel-compiler.c)
+    target_sources(lynx_ysfx PRIVATE ${YSFX_DIR}/sources/eel2-gas/sources/asm-nseel-x64-sse.S)
+    enable_language(ASM)
+endif()
+target_include_directories(lynx_ysfx PUBLIC ${YSFX_DIR}/include PRIVATE ${YSFX_DIR}/sources ${YSFX_DIR}/thirdparty/WDL/source ${YSFX_DIR}/thirdparty/dr_libs)
+target_compile_definitions(lynx_ysfx PUBLIC YSFX_API= PRIVATE YSFX_NO_GFX WDL_FFT_REALSIZE=8 WDL_LINEPARSE_ATOF=ysfx_wdl_atof NSEEL_ATOF=ysfx_wdl_atof
+    $<$<BOOL:${WIN32}>:NOMINMAX YSFX_NO_FTS _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS> $<$<NOT:$<BOOL:${WIN32}>>:_FILE_OFFSET_BITS=64>)
+set_target_properties(lynx_ysfx PROPERTIES CXX_STANDARD 17 C_STANDARD 11 POSITION_INDEPENDENT_CODE ON
+    C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden)
+target_compile_options(lynx_ysfx PRIVATE $<$<NOT:$<C_COMPILER_ID:MSVC>>:-fsigned-char -w>)
+find_package(Threads REQUIRED)
+target_link_libraries(lynx_ysfx PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(lynx_core PUBLIC lynx_ysfx)
+
 # Monocypher 4.0.2 (BSD-2 / CC0; third_party/monocypher): Argon2id, BLAKE2b and XChaCha20-Poly1305 for the live
 # sessions' end-to-end encryption (round 169b)
 add_library(monocypher STATIC third_party/monocypher/monocypher.c)
 target_include_directories(monocypher PUBLIC third_party/monocypher)
 target_compile_options(monocypher PRIVATE $<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>)
 target_link_libraries(lynx_core PUBLIC monocypher)
+
+# libxmp-lite 4.7.4 (MIT; third_party/libxmp-lite, LYNX's read-only accessors in src/lynx_xmp_extra.c): reads .mod, .xm,
+# .s3m and .it for the module import (round 190nw, core/ModuleImport.h)
+file(GLOB LIBXMP_SOURCES third_party/libxmp-lite/src/*.c third_party/libxmp-lite/src/loaders/*.c)
+add_library(libxmp_lite STATIC ${LIBXMP_SOURCES})
+target_include_directories(libxmp_lite PUBLIC third_party/libxmp-lite/include/libxmp-lite PRIVATE third_party/libxmp-lite/src)
+target_compile_definitions(libxmp_lite PUBLIC LIBXMP_STATIC PRIVATE LIBXMP_CORE_PLAYER $<IF:$<C_COMPILER_ID:MSVC>,_USE_MATH_DEFINES,_REENTRANT>)
+set_target_properties(libxmp_lite PROPERTIES C_STANDARD 99)
+target_compile_options(libxmp_lite PRIVATE $<$<NOT:$<C_COMPILER_ID:MSVC>>:-w>)
+target_link_libraries(lynx_core PUBLIC libxmp_lite)
 
 # LAME's libmp3lame (LGPL; third_party/lame, encoder only, configured by third_party/lame/src/config.h)
 file(GLOB LAME_SOURCES third_party/lame/src/*.c)
@@ -399,10 +498,18 @@ target_link_libraries(flpdump PRIVATE lynx_core)
 add_executable(renderwav tools/renderwav.cpp)
 target_link_libraries(renderwav PRIVATE lynx_core)
 
+# a tracker module rendered by libxmp-lite's own player (round 190nw): the reference for the module import's renders
+add_executable(modrender tools/modrender.cpp)
+target_link_libraries(modrender PRIVATE libxmp_lite)
+
 # the audio engine's CPU per block, headless (round 190ge): perfbench <scenario> [--block N] [--threads N] ...
 add_executable(perfbench tools/perfbench.cpp)
 target_link_libraries(perfbench PRIVATE lynx_core)
 target_include_directories(perfbench PRIVATE tools)
+
+# LYNX Model (round 190ni): renders notes for the timbre score / calibration and measures the cost per voice
+add_executable(physmodrender tools/physmodrender.cpp)
+target_link_libraries(physmodrender PRIVATE lynx_core)
 
 enable_testing()
 add_test(NAME lynx_tests COMMAND lynx_tests)
@@ -469,8 +576,10 @@ if(LYNX_BUILD_APP)
         src/engine/Metronome.cpp
         src/engine/SampleLibrary.cpp
     src/engine/WavPackFormat.cpp
+    src/engine/NcwFormat.cpp
     src/engine/Mp3Format.cpp
         src/engine/ProjectFile.cpp
+        src/engine/ProjectDowngrade.cpp
         src/engine/ProjectPackage.cpp
         src/engine/SessionPack.cpp
         src/ui/SessionDialogs.cpp
@@ -482,17 +591,31 @@ if(LYNX_BUILD_APP)
         src/engine/ShortExportTest.cpp
         src/engine/ExportParityTest.cpp
         src/engine/MidiHotplugTest.cpp
+        src/engine/MidiOutPortTest.cpp
+        src/engine/PadRecordTest.cpp
+        src/engine/ShareMemoryTest.cpp
         src/ui/LiveSessionUi.cpp
         src/ui/LiveChat.cpp
         src/engine/LiveRemotePlugins.cpp
         src/ui/LiveRemoteUi.cpp
         src/engine/PluginHost.cpp
+        src/engine/AraHost.cpp
+        src/engine/AraTest.cpp
         src/engine/FlStudio.cpp
         src/engine/PluginSandbox.cpp
         src/engine/SandboxWorker.cpp
         src/engine/Bridge32Test.cpp
         src/engine/ClapTeardownTest.cpp
+        src/engine/RenderAgainTest.cpp
+        src/engine/Determinism190poTest.cpp
+        src/engine/HostingTests.cpp
+        src/engine/Modulators190oxTest.cpp
         src/engine/Exporter.cpp
+        # M4A export through the system's AAC encoder (owner decision D5): each file compiles on its own platform only
+        # (Windows: Media Foundation, linked below; macOS: AudioToolbox; elsewhere: not available)
+        src/engine/AacEncoder.cpp
+        src/engine/AacEncoderWindows.cpp
+        src/engine/AacEncoderMac.cpp
         src/engine/FlStudioExport.cpp
         src/engine/StreamPrefetcher.cpp
         src/engine/DllAsioDevice.cpp
@@ -500,6 +623,8 @@ if(LYNX_BUILD_APP)
         src/platform/LinuxRealtime.cpp
         src/engine/ClapFormat.cpp
         src/engine/Vst2Format.cpp
+        src/engine/JsfxFormat.cpp
+        src/ui/JsfxPanel.cpp
         src/engine/MidiFileIo.cpp
         src/engine/AudioLogger.cpp
         src/engine/MidiSyncIo.cpp
@@ -510,6 +635,7 @@ if(LYNX_BUILD_APP)
         src/ui/ChannelRackComponent.cpp
         src/ui/PianoRollComponent.cpp
         src/ui/PlaylistComponent.cpp
+        src/ui/AraMenu.cpp
         src/ui/PatternBlocksView.cpp
         src/ui/MixerComponent.cpp
         src/ui/QuickPick.cpp
@@ -519,6 +645,7 @@ if(LYNX_BUILD_APP)
         src/ui/ProjectLoading.cpp
         src/ui/WindowOwner.cpp
         src/ui/PluginKeysTest.cpp
+        src/ui/ZOrder191Test.cpp
         src/ui/ParametricEqEditor.cpp
         src/ui/FacetEqEditor.cpp
         src/ui/ProEditors.cpp
@@ -532,11 +659,15 @@ if(LYNX_BUILD_APP)
         src/ui/ExportDialog.cpp
         src/ui/FlStudioExportDialog.cpp
         src/ui/AlsExportDialog.cpp
+        src/ui/DawProjectExport.cpp
+        src/ui/FlmExportDialog.cpp
+        src/ui/TrackImportDialog.cpp
         src/ui/GamepadInput.cpp
         src/ui/ControllerBridge.cpp
         src/ui/OtherAppsExport.cpp
         src/ui/AutoSamplerDialog.cpp
         src/ui/AutomationUi.cpp
+        src/ui/ModRing.cpp
         src/ui/RemoteControl.cpp
         src/ui/ControllerEditors.cpp
         src/ui/MidiOutEditor.cpp
@@ -551,6 +682,10 @@ if(LYNX_BUILD_APP)
         src/ui/AdrWindow.cpp
         src/ui/WaveTravellerEditor.cpp
         src/ui/FpcEditor.cpp
+        src/ui/TetraEditor.cpp
+        src/ui/LynxModelEditor.cpp
+        src/ui/DirectWaveEditor.cpp
+        src/ui/HelixEditor.cpp
         src/ui/FruitySlicerEditor.cpp
         src/ui/FlVoicePanel.cpp
         src/ui/SlicexEditor.cpp
@@ -560,11 +695,13 @@ if(LYNX_BUILD_APP)
         src/ui/Controllers164.cpp
         src/ui/VoltageEditor.cpp
         src/ui/SoundFontEditor.cpp
+        src/ui/SamplerImportUi.cpp
         src/ui/VfxEditors.cpp
         src/ui/BrowserComponent.cpp
         src/ui/Theme.cpp
         src/ui/ThemeSettings.cpp
         src/ui/ColourPicker.cpp
+        src/ui/AutoLookEditor.cpp
         src/ui/TrackIcons.cpp
         src/ui/Icons.cpp
         src/ui/I18n.cpp
@@ -574,11 +711,16 @@ if(LYNX_BUILD_APP)
     list(APPEND LYNX_APP_SOURCES
         src/ui/Workspace.cpp
         src/ui/NativeChild.cpp
+        src/ui/DockPaintCheck.cpp
+        src/ui/MotionOverlay.cpp
         src/ui/ExternalDrag.cpp
         src/ui/ExternalDragX11.cpp
         src/ui/ValueControl.cpp
         src/ui/Dialogs.cpp
         src/ui/SetupWizard.cpp
+        src/ui/Onboarding.cpp
+        src/ui/MainOnboarding.cpp
+        src/ui/DemoMode.cpp
         src/ui/Splash.cpp)
 
     # main window chrome: hint bar and toolbar widgets
@@ -595,18 +737,29 @@ if(LYNX_BUILD_APP)
         src/ui/NoteToolDialogs.cpp
         src/ui/PianoRollScripts.cpp
         src/ui/MidiClipboard.cpp
+        src/ui/WindowClipboard.cpp
+        src/ui/LynxWindows.cpp
+        src/ui/WindowAudio.cpp
+        src/engine/CrossClipboard.cpp
         src/ui/AudioClipboard.cpp
         src/ui/EventEditor.cpp
+        src/ui/TrackerComponent.cpp
         src/ui/AudioEditor.cpp
         src/ui/AudioEditorTools.cpp
+        src/ui/ArticulatorTools.cpp
+        src/ui/SampleProperties.cpp
         src/ui/ToolWindow.cpp
+        src/ui/DeleteFade.cpp
+        src/ui/StartPage.cpp
         src/ui/SpeechDialog.cpp
         src/ui/TempoTapper.cpp
         src/ui/TempoDetectionDialog.cpp
         src/ui/LoopStarterWindow.cpp
         src/ui/SimpleWorkflow.cpp
+        src/ui/LoopInfo.cpp
         src/ui/FinishDock.cpp
         src/ui/SimpleDock.cpp
+        src/ui/SimpleTuner.cpp
         src/ui/HistoryPanel.cpp
         src/ui/VersionsPanel.cpp
         src/ui/LyricsPanel.cpp
@@ -618,8 +771,11 @@ if(LYNX_BUILD_APP)
         src/ui/MissingFilesDialog.cpp
         src/ui/SettingsDialog.cpp
         src/ui/SettingsPages.cpp
+        src/ui/WorkflowExtras.cpp
+        src/ui/KeyFocus.cpp
         src/ui/PluginManager.cpp
         src/ui/ShortcutManager.cpp
+        src/ui/ActionSearch.cpp
         src/ui/NewProjectDialog.cpp
         src/ui/ClipProperties.cpp
         src/ui/PluginMonitorWindow.cpp
@@ -630,16 +786,20 @@ if(LYNX_BUILD_APP)
         src/ui/SessionMixer.cpp
         src/ui/MapMode.cpp
         src/ui/MidiToolsPanel.cpp
+        src/ui/ChordHelper.cpp
         src/ui/TouchKeyboard.cpp
         src/ui/QuickAddPalette.cpp
         src/ui/PluginPickerView.cpp
+        src/ui/PickerLook.cpp
+        src/ui/ProjectPickerView.cpp
         src/ui/PluginThumbs.cpp
         src/ui/PluginPicker.cpp
         src/ui/CrashReporter.cpp
         src/ui/Updater.cpp
         src/ui/AudioCheck.cpp
         src/ui/StemExtract.cpp
-        src/ui/AudioToMidi.cpp)
+        src/ui/AudioToMidi.cpp
+        src/ui/PolyEditor.cpp)
     target_sources(LYNX PRIVATE src/Main.cpp ${LYNX_APP_SOURCES})
     # Ableton Link 4.1.1 (GPL-2.0-or-later, used under the GPLv3; third_party/link, round 190gl) with its bundled Asio
     # (Boost licence): header-only, used by src/engine/AbletonLink.cpp alone (it sets Link's and Asio's macros itself)
@@ -648,6 +808,7 @@ if(LYNX_BUILD_APP)
     target_include_directories(LYNX PRIVATE third_party/onnxruntime) # loaded at run time, never linked
 
     target_include_directories(LYNX PRIVATE third_party/clap/include)
+    target_include_directories(LYNX PRIVATE third_party/ara) # (ARA_API / ARA_Library, round 190kx)
     # the commit the build comes from (crash reports name it, round 159)
     execute_process(COMMAND git rev-parse --short=10 HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                     OUTPUT_VARIABLE LYNX_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
@@ -658,6 +819,8 @@ if(LYNX_BUILD_APP)
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_PLUGINHOST_VST3=1
+        # ARA 2 hosting (round 190kx): Celemony's ARA SDK 2.1 headers and library sources in third_party/ara (Apache-2.0)
+        JUCE_PLUGINHOST_ARA=1
         # MP3 is read by LYNX (src/engine/Mp3Format, minimp3; round 157b), not by JUCE's MP3AudioFormat
         JUCE_USE_MP3AUDIOFORMAT=0
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:LYNX,JUCE_PRODUCT_NAME>"
@@ -669,20 +832,34 @@ if(LYNX_BUILD_APP)
         target_compile_definitions(LYNX PRIVATE JUCE_ASIO=1) # ASIO SDK headers in third_party/asiosdk (GPLv3 option)
         target_link_libraries(LYNX PRIVATE winhttp bcrypt advapi32) # live sessions' WebSocket (engine/LiveLink.cpp)
         target_link_libraries(LYNX PRIVATE ws2_32 iphlpapi) # Ableton Link's sockets and network interfaces (round 190gl)
-        target_link_libraries(LYNX PRIVATE mfplat mfreadwrite mfuuid propsys) # the system's video decoder (round 174d)
+        # the system's video decoder (round 174d) and AAC encoder (M4A export, engine/AacEncoderWindows.cpp)
+        target_link_libraries(LYNX PRIVATE mfplat mfreadwrite mfuuid propsys)
     elseif(APPLE)
         target_compile_definitions(LYNX PRIVATE JUCE_PLUGINHOST_AU=1)
         # the system's video decoder (round 174d, ui/VideoMediaMac.mm; manual retain / release)
         target_sources(LYNX PRIVATE src/ui/VideoMediaMac.mm)
         set_source_files_properties(src/ui/VideoMediaMac.mm PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
+        # the moving marks as Core Animation layers (round 190jx, ui/MotionOverlayMac.h; off by default: LYNX_OVERLAY_MAC=1)
+        target_sources(LYNX PRIVATE src/ui/MotionOverlayMac.mm)
+        set_source_files_properties(src/ui/MotionOverlayMac.mm PROPERTIES COMPILE_OPTIONS "-fno-objc-arc")
+        target_link_libraries(LYNX PRIVATE "-framework QuartzCore")
         target_link_libraries(LYNX PRIVATE "-framework AVFoundation" "-framework CoreMedia" "-framework CoreVideo")
+        target_link_libraries(LYNX PRIVATE "-framework AudioToolbox" "-framework CoreFoundation") # M4A export (engine/AacEncoderMac.cpp)
         target_link_libraries(LYNX PRIVATE ${CMAKE_DL_LIBS}) # (libcurl loaded at run time: engine/LiveLink.cpp)
+        # the main thread's stack: 32 MB instead of macOS's fixed 8 MB (rollup 0.1.31 step 6). --selftest keeps its items'
+        # engines and songs on the main thread's stack (round 190mo: 7.4 MB; GCC's frame is 9.2 MB at step 6) and Linux
+        # raises its limit at run time (platform::allowMainThreadStack); on macOS only the linker sets it, and CI's App
+        # macOS self-test was killed at its first line. Reserved address space only
+        target_link_options(LYNX PRIVATE "LINKER:-stack_size,0x2000000")
     else()
         # ALSA (linked) + JACK (loaded at run time; PipeWire serves JACK clients through pipewire-jack)
         target_compile_definitions(LYNX PRIVATE JUCE_ALSA=1 JUCE_JACK=1 JUCE_PLUGINHOST_LV2=1)
         # LYNX's own PipeWire driver (round 161): vendored MIT headers, libpipewire-0.3.so.0 loaded at run time
         target_include_directories(LYNX SYSTEM PRIVATE third_party/pipewire/include/pipewire-0.3 third_party/pipewire/include/spa-0.2)
         target_link_libraries(LYNX PRIVATE ${CMAKE_DL_LIBS})
+        # the X server draws the moving marks (round 190jx, ui/MotionOverlayX11.h; libX11 / libXrender loaded at run time
+        # as JUCE loads them: only their headers are needed)
+        target_sources(LYNX PRIVATE src/ui/MotionOverlayX11.cpp)
     endif()
 
     # the UI font on Linux and the BSDs (src/ui/Theme.cpp); Windows and macOS use their own and don't carry the files
@@ -722,6 +899,19 @@ if(LYNX_BUILD_APP)
         target_link_libraries(lynx_remote_project_tests PRIVATE bcrypt advapi32)
     endif()
     add_test(NAME lynx_remote_project_tests COMMAND lynx_remote_project_tests)
+    # round 190nz (issue #232 stage 2): the cross-window clipboard's documents and side file
+    add_executable(lynx_crossclipboard_tests
+        tests/CrossClipboardTests.cpp
+        src/engine/CrossClipboard.cpp
+        src/engine/ProjectFile.cpp)
+    target_include_directories(lynx_crossclipboard_tests PRIVATE src)
+    target_compile_definitions(lynx_crossclipboard_tests PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0
+        JUCE_APPLICATION_VERSION_STRING="${PROJECT_VERSION}")
+    target_link_libraries(lynx_crossclipboard_tests PRIVATE lynx_core juce::juce_core)
+    if(WIN32)
+        target_link_libraries(lynx_crossclipboard_tests PRIVATE bcrypt advapi32)
+    endif()
+    add_test(NAME lynx_crossclipboard_tests COMMAND lynx_crossclipboard_tests)
 endif()
 
 # LYNX's own effects and instruments as VST3 / CLAP plugins for other hosts (round 180b, docs/PLUGIN_EXPORT.md). Off by

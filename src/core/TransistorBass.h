@@ -70,6 +70,16 @@ struct TransistorBassProgram
     std::array<Step, 32> steps {};
 };
 std::optional<TransistorBassProgram> transistorBassProgram (const std::vector<std::uint8_t>& state);
+// Round 190nr (GitHub discussion #202, a LYNX extra: FL's Transistor Bass copies a sequence only to another Transistor
+// Bass, as its own "TransistorBass_Pattern" clipboard data): the shown program's sequence as notes, the way its
+// sequencer plays it while a key is held (stepEvent / clockSequencer): one note per step whose gate is on, at the
+// step's start (16th notes at `songTempo`, or at the sequence's own BPM when it has one; the sequence's shuffle delays
+// the odd steps), key = the step's note + the program's transpose, the sequence's gate length (0.66 of a step); a slide
+// step lasts until the next gated step and overlaps it by an eighth of a step (overlapping notes glide on Transistor
+// Bass and on mono / legato synths; the last one ends with the sequence); an accent step has velocity 1.0 (≥ 110 of
+// 127: Transistor Bass's accent), the others 0.78. Channel 0, starting at tick 0; `lengthTicks` gets the sequence's
+// length. Empty when the state can't be read or no step has its gate on.
+std::vector<Note> transistorBassSequenceNotes (const std::vector<std::uint8_t>& state, double songTempo, std::int64_t* lengthTicks = nullptr);
 // FL's editor shows and edits its "edit program"; with the sequencer on and the state's follow flag set, a note makes
 // both the playing and the edit program the note's key (engine_x64 FUN_18000d5a0, REA_rodada169g2): the state's
 // program and edit program become `program` (0…127), in place; false when the state is not usable (round 169g2)
@@ -81,6 +91,31 @@ namespace tbseq
 {
 constexpr int length = 100, sequencer = 101, firstStep = 110, steps = 16;
 }
+// FL's program row (round 190mc, GitHub discussion #202; the plugin's form TSynthEditorForm: ProgramAutoFollowCheckBox,
+// ProgramDigiWheel, PatternDigiWheel + PatternNameEdit, PatternTransposeDigiWheel, ParamPatchDigiWheel + ParamPatchNameEdit,
+// the two "shared" indicators, ReadPatternBtn / WritePatternBtn): parameters after the sequence's — the program shown and
+// played (0…127, FL shows its key: 60 = C5), AF (the page follows the notes' programs), and the shown program's
+// sequence number, sequence transpose (−48…48) and patch number (0…127, FL shows 1…128).
+namespace tbprog
+{
+constexpr int program = 102, follow = 103, sequence = 104, transpose = 105, patch = 106;
+}
+// The names of the 128 patches and sequences and how many programs use each (FL's right-click lists and its "shared"
+// indicators), and whether the shown program's working patch differs from its stored copy (FL lights WRITE)
+struct TransistorBassBank
+{
+    std::array<std::string, 128> patches, sequences;
+    std::array<int, 128> patchUsers {}, sequenceUsers {};
+    int program = 0, patch = 0, sequence = 0;
+    bool edited = false;
+};
+std::optional<TransistorBassBank> transistorBassBank (const std::vector<std::uint8_t>& state);
+// FL's READ (the stored patch back into the working copy) and WRITE (the working copy stored) for the shown program's
+// patch; false when the state can't be read
+bool transistorBassReadPatch (std::vector<std::uint8_t>& state);
+bool transistorBassWritePatch (std::vector<std::uint8_t>& state);
+// FL's name fields: renames patch / sequence `index` (both copies of a patch), in place (the state grows or shrinks)
+bool transistorBassRename (std::vector<std::uint8_t>& state, bool patch, int index, const std::string& name);
 // Clear (gates, slides and accents off, notes C5) or move every step an octave (±1) — FL's CLEAR and octave buttons;
 // false when the state can't be read
 bool transistorBassClearSequence (std::vector<std::uint8_t>& state);

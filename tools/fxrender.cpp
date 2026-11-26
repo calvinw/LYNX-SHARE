@@ -18,6 +18,9 @@
 //     --ticks <ppq> [mode]     also split blocks at song ticks (a host that cuts its buffers on a <ppq> grid; mode 0 floor,
 //                              1 round, 2 ceil of the tick's sample position)
 //     --settle <s>             silence processed before each file (default 0.5 s, after a reset)
+//     --settlesong             with --songpos: the song position runs through the settle too (round 190nh)
+//     --slotmix                apply the slot's dry / wet (a substitute's or translator's slot mix) as the mixer does
+//                              (round 190jh: dry + (wet - dry) * mix below 0.999; off by default so older banks reproduce)
 //     --list                   print the parameters (index, name, value, text) and exit
 //     --dump <file>            write the parameters ("index value" lines; LYNX --parityshot reads them)
 // Every input is processed from a reset; the output is a 32-bit float stereo WAV, not latency-compensated (the
@@ -200,12 +203,12 @@ int main (int argc, char** argv)
     auto kind = (EffectKind) kindIndex;
     auto slot = makeEffectSlot (kind);
     double rate = 0.0, settle = 0.5;
-    bool songPos = false;
+    bool songPos = false, settleSong = false;
     double songOffset = 0.0; // samples
     int block = 512;
     double tickPpq = 0.0;
     int tickMode = 0;
-    bool list = false;
+    bool list = false, slotMix = false;
     std::string dump;
     std::vector<std::string> files;
     for (int i = 2; i < argc; ++i)
@@ -219,6 +222,10 @@ int main (int argc, char** argv)
             songPos = true, songOffset = std::atof (argv[++i]); // round 188i: the song position (from 0 at the file's first sample) before each block, as a host gives it
         else if (a == "--ticks" && i + 2 < argc)
             tickPpq = std::atof (argv[++i]), tickMode = std::atoi (argv[++i]);
+        else if (a == "--slotmix")
+            slotMix = true;
+        else if (a == "--settlesong")
+            settleSong = true;
         else if (a == "--settle" && i + 1 < argc)
             settle = std::atof (argv[++i]);
         else if (a == "--list")
@@ -288,6 +295,8 @@ int main (int argc, char** argv)
         if (std::abs (slot.params[p] - info.params[p].defaultValue) > 1e-6f)
             std::printf ("param %zu %s = %.6f (%s)\n", p, info.params[p].name, slot.params[p],
                          formatEffectParam (kind, (int) p, slot.params[p], 120.0, slot.params).c_str());
+    if (slot.mix < 0.999f)
+        std::printf ("slot mix %.4f%s\n", slot.mix, slotMix ? "" : " (not applied: --slotmix)");
     for (std::size_t f = 0; f + 1 < files.size(); f += 2)
     {
         Audio in;
@@ -301,11 +310,15 @@ int main (int argc, char** argv)
         fx->prepare (sr);
         fx->reset();
         std::vector<float> l ((std::size_t) block), r ((std::size_t) block);
-        for (int left = (int) (settle * sr); left > 0; left -= block)
+        const int settleN = (int) (settle * sr);
+        for (int left = settleN; left > 0; left -= block)
         {
             const int n = std::min (block, left);
             std::fill (l.begin(), l.end(), 0.0f);
             std::fill (r.begin(), r.end(), 0.0f);
+            // round 190nh: --settlesong: the play head runs through the settle too (as fxmeasure's does)
+            if (songPos && settleSong)
+                fx->setSongPosition (((double) (settleN - left) - settleN + songOffset) / sr * 2.0 * (double) ppq);
             fx->process (l.data(), r.data(), n, slot.params, 120.0);
         }
         Audio out;
@@ -329,7 +342,18 @@ int main (int argc, char** argv)
             }
             if (songPos)
                 fx->setSongPosition (((double) at + songOffset) / sr * 2.0 * (double) ppq); // 120 BPM: two beats a second
-            fx->process (out.l.data() + at, out.r.data() + at, (int) n, slot.params, 120.0);
+            if (slotMix && slot.mix < 0.999f)
+            {
+                std::vector<float> dl (out.l.begin() + (long) at, out.l.begin() + (long) (at + n)), dr (out.r.begin() + (long) at, out.r.begin() + (long) (at + n));
+                fx->process (out.l.data() + at, out.r.data() + at, (int) n, slot.params, 120.0);
+                for (std::size_t k = 0; k < n; ++k)
+                {
+                    out.l[at + k] = dl[k] + (out.l[at + k] - dl[k]) * slot.mix;
+                    out.r[at + k] = dr[k] + (out.r[at + k] - dr[k]) * slot.mix;
+                }
+            }
+            else
+                fx->process (out.l.data() + at, out.r.data() + at, (int) n, slot.params, 120.0);
         }
         bool finite = true;
         for (std::size_t n = 0; n < out.l.size(); ++n)

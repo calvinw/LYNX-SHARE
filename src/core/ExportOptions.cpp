@@ -1,4 +1,6 @@
 #include "core/ExportOptions.h"
+#include "core/ExportNaming.h"
+#include "core/MarkerPlan.h"
 #include "core/Scheduler.h"
 
 #include <algorithm>
@@ -34,6 +36,14 @@ const std::vector<int>& oggBitrates()
     return list;
 }
 
+const std::vector<int>& aacBitrates()
+{
+    // Media Foundation's AAC encoder takes exactly these (MF_MT_AUDIO_AVG_BYTES_PER_SECOND 12000 / 16000 / 20000 /
+    // 24000); macOS' encoder takes them too, so the window offers the same list everywhere
+    static const std::vector<int> list { 96, 128, 160, 192 };
+    return list;
+}
+
 const std::vector<double>& sampleRates()
 {
     static const std::vector<double> list { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
@@ -47,10 +57,33 @@ const char* extension (Format format)
         case Format::mp3: return ".mp3";
         case Format::ogg: return ".ogg";
         case Format::flac: return ".flac";
+        case Format::aiff: return ".aif";
+        case Format::aac: return ".m4a";
         case Format::wav: break;
     }
     return ".wav";
 }
+
+const char* formatName (Format format)
+{
+    switch (format)
+    {
+        case Format::mp3: return "MP3";
+        case Format::ogg: return "OGG";
+        case Format::flac: return "FLAC";
+        case Format::aiff: return "AIFF";
+        case Format::aac: return "M4A";
+        case Format::wav: break;
+    }
+    return "WAV";
+}
+
+namespace
+{
+// every format, in the order the window lists them (and formatsOf writes the "more" ones)
+constexpr Format allFormats[] { Format::wav, Format::mp3, Format::ogg, Format::flac, Format::aiff, Format::aac };
+constexpr std::uint32_t allFormatsMask = (1u << formatCount) - 1u;
+} // namespace
 
 int fileBits (const Options& o) noexcept
 {
@@ -58,8 +91,10 @@ int fileBits (const Options& o) noexcept
     {
         case Format::wav: return o.wavBits;
         case Format::flac: return o.flacBits;
+        case Format::aiff: return o.aiffBits;
         case Format::mp3:
-        case Format::ogg: break;
+        case Format::ogg:
+        case Format::aac: break;
     }
     return 16;
 }
@@ -70,7 +105,7 @@ bool usesDither (const Options& o) noexcept
         return false;
     if (o.format == Format::wav)
         return o.wavBits == 16 || o.wavBits == 24;
-    return o.format == Format::flac;
+    return o.format == Format::flac || o.format == Format::aiff;
 }
 
 double mp3SampleRate (double rate) noexcept
@@ -78,6 +113,98 @@ double mp3SampleRate (double rate) noexcept
     if (rate == 32000.0 || rate == 44100.0 || rate == 48000.0)
         return rate;
     return std::fmod (rate, 11025.0) == 0.0 ? 44100.0 : 48000.0;
+}
+
+int aacDecimation (double rate) noexcept
+{
+    for (int factor = 1; factor <= 16; factor *= 2)
+        if (rate == 44100.0 * factor || rate == 48000.0 * factor)
+            return factor;
+    return 0;
+}
+
+double aacSampleRate (double rate) noexcept
+{
+    const auto factor = aacDecimation (rate);
+    return factor > 0 ? rate / factor : 0.0;
+}
+
+namespace
+{
+double besselI0 (double x) noexcept
+{
+    double sum = 1.0, term = 1.0;
+    for (int k = 1; k < 64; ++k)
+    {
+        term *= (x / (2.0 * k)) * (x / (2.0 * k));
+        sum += term;
+        if (term < sum * 1.0e-17)
+            break;
+    }
+    return sum;
+}
+
+// one halving: `rate` → rate / 2, the band up to `pass` kept, everything from `stop` up removed before it folds down
+std::vector<float> halve (const std::vector<float>& x, double rate, double pass, double stop)
+{
+    constexpr double attenuation = 95.0; // dB
+    const auto beta = 0.1102 * (attenuation - 8.7);
+    const auto width = 2.0 * 3.14159265358979323846 * (stop - pass) / rate;
+    auto taps = (int) std::ceil ((attenuation - 7.95) / (2.285 * width)) + 1;
+    taps |= 1; // odd: a centre tap, zero delay
+    const auto half = taps / 2;
+    const auto cutoff = (pass + stop) * 0.5 / rate; // cycles per sample
+    std::vector<double> h ((std::size_t) half + 1); // h[0] the centre, h[j] = h[-j]
+    double sum = 0.0;
+    for (int j = 0; j <= half; ++j)
+    {
+        const auto t = (double) j / half;
+        const auto window = besselI0 (beta * std::sqrt (std::max (0.0, 1.0 - t * t))) / besselI0 (beta);
+        const auto arg = 2.0 * 3.14159265358979323846 * cutoff * j;
+        h[(std::size_t) j] = (j == 0 ? 2.0 * cutoff : std::sin (arg) / (3.14159265358979323846 * j)) * window;
+        sum += j == 0 ? h[0] : 2.0 * h[(std::size_t) j];
+    }
+    for (auto& v : h)
+        v /= sum; // unity gain at DC
+
+    const auto n = (std::int64_t) x.size();
+    std::vector<float> out ((std::size_t) ((n + 1) / 2));
+    const auto at = [&x, n] (std::int64_t i) { return i >= 0 && i < n ? (double) x[(std::size_t) i] : 0.0; };
+    for (std::int64_t m = 0; m < (std::int64_t) out.size(); ++m)
+    {
+        const auto c = 2 * m;
+        double acc = h[0] * at (c);
+        if (c - half >= 0 && c + half < n) // (the inside: no bounds to check)
+        {
+            const float* p = x.data() + c;
+            for (int j = 1; j <= half; ++j)
+                acc += h[(std::size_t) j] * ((double) p[-j] + (double) p[j]);
+        }
+        else
+            for (int j = 1; j <= half; ++j)
+                acc += h[(std::size_t) j] * (at (c - j) + at (c + j));
+        out[(std::size_t) m] = (float) acc;
+    }
+    return out;
+}
+} // namespace
+
+std::vector<float> decimate (const std::vector<float>& x, double rate, int factor)
+{
+    if (factor <= 1 || (factor & (factor - 1)) != 0 || rate <= 0.0)
+        return x;
+    const auto target = rate / factor;
+    const auto pass = std::min (20000.0, 0.45 * target);
+    auto y = x;
+    for (auto r = rate; r > target * 1.5; r *= 0.5)
+    {
+        const auto last = r * 0.5 <= target * 1.5;
+        // the last stage removes everything from the new Nyquist up; the earlier ones only what would fold into the
+        // band the file keeps (0 .. target / 2), so they are short
+        const auto stop = last ? target * 0.5 : r * 0.5 - target * 0.5;
+        y = halve (y, r, pass, stop);
+    }
+    return y;
 }
 
 namespace
@@ -126,12 +253,18 @@ double toDouble (const std::map<std::string, std::string>& kv, const char* key, 
 Options clamped (Options o)
 {
     const Options d;
-    if ((int) o.format < 0 || (int) o.format > 3) o.format = d.format;
+    // (round 190ng: the name template is one line; an empty one is the default "$project")
+    o.nameTemplate.erase (std::remove_if (o.nameTemplate.begin(), o.nameTemplate.end(), [] (char c) { return c == '\n' || c == '\r'; }), o.nameTemplate.end());
+    if (o.nameTemplate.find_first_not_of (' ') == std::string::npos)
+        o.nameTemplate = d.nameTemplate;
+    if ((int) o.format < 0 || (int) o.format >= formatCount) o.format = d.format;
     if (o.wavBits != 16 && o.wavBits != 24 && o.wavBits != 32) o.wavBits = d.wavBits;
     if (o.flacBits != 16 && o.flacBits != 24) o.flacBits = d.flacBits;
+    if (o.aiffBits != 16 && o.aiffBits != 24) o.aiffBits = d.aiffBits;
     o.flacLevel = std::clamp (o.flacLevel, 0, 8);
     o.mp3Kbps = nearest (mp3Bitrates(), o.mp3Kbps);
     o.oggKbps = nearest (oggBitrates(), o.oggKbps);
+    o.aacKbps = nearest (aacBitrates(), o.aacKbps);
     o.sampleRate = nearest (sampleRates(), o.sampleRate);
     if ((int) o.dither < 0 || (int) o.dither > 2) o.dither = d.dither;
     if ((int) o.tail < 0 || (int) o.tail > 2) o.tail = d.tail;
@@ -141,7 +274,7 @@ Options clamped (Options o)
     o.loops = std::clamp (o.loops, 1, 16);
     if ((int) o.stems < 0 || (int) o.stems > (int) Stems::channelsDry) o.stems = d.stems;
     if ((int) o.channels < 0 || (int) o.channels > 3) o.channels = d.channels;
-    o.moreFormats &= 0xFu & ~(1u << (int) o.format);
+    o.moreFormats &= allFormatsMask & ~(1u << (int) o.format);
     if (! (o.masterLufs >= -30.0 && o.masterLufs <= -5.0)) o.masterLufs = d.masterLufs;
     return o;
 }
@@ -157,7 +290,7 @@ std::int64_t estimatedBytes (const Options& o, double seconds) noexcept
         return 0;
     const auto channels = o.channels == Channels::stereo ? 2.0 : 1.0;
     std::int64_t total = 0; // every format the export writes (FL's disk space counts all ticked boxes)
-    for (const auto f : { Format::wav, Format::mp3, Format::ogg, Format::flac })
+    for (const auto f : allFormats)
         if (f == o.format || (o.moreFormats & (1u << (int) f)) != 0)
         switch (f)
         {
@@ -165,6 +298,8 @@ std::int64_t estimatedBytes (const Options& o, double seconds) noexcept
             case Format::flac: total += (std::int64_t) (seconds * o.sampleRate * channels * (o.flacBits / 8.0) * 0.6); break; // ~60 % of PCM
             case Format::mp3: total += (std::int64_t) (seconds * o.mp3Kbps * 1000.0 / 8.0); break;
             case Format::ogg: total += (std::int64_t) (seconds * o.oggKbps * 1000.0 / 8.0); break;
+            case Format::aiff: total += (std::int64_t) (seconds * o.sampleRate * channels * (o.aiffBits / 8.0)) + 54; break; // FORM + COMM + SSND headers
+            case Format::aac: total += (std::int64_t) (seconds * o.aacKbps * 1000.0 / 8.0); break;
         }
     return total;
 }
@@ -172,7 +307,7 @@ std::int64_t estimatedBytes (const Options& o, double seconds) noexcept
 std::vector<Format> formatsOf (const Options& o)
 {
     std::vector<Format> out { o.format };
-    for (const auto f : { Format::wav, Format::mp3, Format::ogg, Format::flac })
+    for (const auto f : allFormats)
         if (f != o.format && (o.moreFormats & (1u << (int) f)) != 0)
             out.push_back (f);
     return out;
@@ -181,7 +316,7 @@ std::vector<Format> formatsOf (const Options& o)
 std::uint32_t flLastExportedMask (const Options& o) noexcept
 {
     std::uint32_t mask = flFormatBit (o.format);
-    for (const auto f : { Format::wav, Format::mp3, Format::ogg, Format::flac })
+    for (const auto f : allFormats)
         if ((o.moreFormats & (1u << (int) f)) != 0)
             mask |= flFormatBit (f);
     return mask;
@@ -192,10 +327,10 @@ Options withFlLastExported (Options o, std::uint32_t mask)
     if (mask < 8 || mask > 0x3FF) // FL: anything else falls back to WAV
         mask = 8;
     std::vector<Format> chosen;
-    for (const auto f : { Format::wav, Format::mp3, Format::ogg, Format::flac })
-        if ((mask & flFormatBit (f)) != 0)
+    for (const auto f : allFormats)
+        if (flFormatBit (f) != 0 && (mask & flFormatBit (f)) != 0)
             chosen.push_back (f);
-    if (chosen.empty()) // only formats LYNX writes elsewhere (MIDI, M4A): WAV
+    if (chosen.empty()) // only a format LYNX writes elsewhere (MIDI): WAV
         chosen.push_back (Format::wav);
     o.format = chosen.front();
     o.moreFormats = 0;
@@ -272,6 +407,8 @@ std::string toText (const Options& o)
       << "flacLevel=" << o.flacLevel << "\n"
       << "mp3Kbps=" << o.mp3Kbps << "\n"
       << "oggKbps=" << o.oggKbps << "\n"
+      << "aiffBits=" << o.aiffBits << "\n"
+      << "aacKbps=" << o.aacKbps << "\n"
       << "sampleRate=" << (int) o.sampleRate << "\n"
       << "dither=" << (int) o.dither << "\n"
       << "tail=" << (int) o.tail << "\n"
@@ -294,7 +431,9 @@ std::string toText (const Options& o)
       << "loopMarkers=" << (o.loopMarkers ? 1 : 0) << "\n"
       << "playlistMarkers=" << (o.playlistMarkers ? 1 : 0) << "\n"
       << "masterLufs=" << o.masterLufs << "\n"
-      << "sections=" << (o.sections ? 1 : 0) << "\n";
+      << "sections=" << (o.sections ? 1 : 0) << "\n"
+      << "songSections=" << (o.songSections ? 1 : 0) << "\n"
+      << "nameTemplate=" << o.nameTemplate << "\n"; // (issue #215, round 190ng)
     return s.str();
 }
 
@@ -309,6 +448,8 @@ Options fromText (const std::string& text)
     o.flacLevel = toInt (kv, "flacLevel", d.flacLevel);
     o.mp3Kbps = toInt (kv, "mp3Kbps", d.mp3Kbps);
     o.oggKbps = toInt (kv, "oggKbps", d.oggKbps);
+    o.aiffBits = toInt (kv, "aiffBits", d.aiffBits);
+    o.aacKbps = toInt (kv, "aacKbps", d.aacKbps);
     o.sampleRate = toDouble (kv, "sampleRate", d.sampleRate);
     o.dither = (DitherMode) toInt (kv, "dither", (int) d.dither);
     o.tail = (TailMode) toInt (kv, "tail", (int) d.tail);
@@ -325,19 +466,58 @@ Options fromText (const std::string& text)
     o.pluginWarmUp = toInt (kv, "pluginWarmUp", d.pluginWarmUp ? 1 : 0) != 0;
     o.showWhenDone = toInt (kv, "showWhenDone", d.showWhenDone ? 1 : 0) != 0;
     o.disableMaxPolyphony = toInt (kv, "disableMaxPolyphony", d.disableMaxPolyphony ? 1 : 0) != 0;
-    o.moreFormats = (std::uint32_t) std::clamp (toInt (kv, "moreFormats", 0), 0, 15);
+    o.moreFormats = (std::uint32_t) std::clamp (toInt (kv, "moreFormats", 0), 0, (int) allFormatsMask);
     o.channels = (Channels) toInt (kv, "channels", (int) d.channels);
     o.saveTempo = toInt (kv, "saveTempo", d.saveTempo ? 1 : 0) != 0;
     o.loopMarkers = toInt (kv, "loopMarkers", d.loopMarkers ? 1 : 0) != 0;
     o.playlistMarkers = toInt (kv, "playlistMarkers", d.playlistMarkers ? 1 : 0) != 0;
     o.masterLufs = toDouble (kv, "masterLufs", d.masterLufs);
     o.sections = toInt (kv, "sections", d.sections ? 1 : 0) != 0;
+    o.songSections = toInt (kv, "songSections", d.songSections ? 1 : 0) != 0; // (round 190ol)
+    if (const auto it = kv.find ("nameTemplate"); it != kv.end() && ! it->second.empty())
+        o.nameTemplate = it->second;
     return clamped (o);
 }
 
 bool hasSelection (const Song& song) noexcept
 {
     return song.loopEnd > song.loopStart && song.loopStart >= 0;
+}
+
+std::vector<std::pair<std::int64_t, std::int64_t>> exportSpans (const Song& song)
+{
+    const auto end = song.songLength();
+    if (! song.exportMarkers || end <= 0)
+        return { { 0, std::max<std::int64_t> (end, 0) } };
+    const auto plan = makeMarkerPlan (song);
+    std::vector<std::pair<std::int64_t, std::int64_t>> spans;
+    auto pos = std::clamp<std::int64_t> (plan.start, 0, end); // (the first Start marker; none: bar 1)
+    bool jumped = false;
+    for (int guard = 0; guard <= MarkerPlan::maxJumps && pos < end; ++guard)
+    {
+        // the next Marker skip after `pos` — or on it, when a skip landed there: skips chain (Raubana's skips at 30720,
+        // 43008 and 49152 each land on the next one; FL's render plays none of those sections). FL's render does not stop
+        // at a Marker pause [EXEC: Raubana with its pause at 53760 ticks renders as without it] and cannot follow a marker
+        // loop, which jumps back
+        const MarkerJump* next = nullptr;
+        for (int i = 0; i < plan.count && next == nullptr; ++i)
+        {
+            const auto& j = plan.jumps[(std::size_t) i];
+            if ((j.at > pos || (jumped && j.at == pos)) && j.at < end && j.kind == MarkerJump::Kind::jump && j.to > j.at)
+                next = &j;
+        }
+        if (next == nullptr)
+            break;
+        if (next->at > pos)
+            spans.push_back ({ pos, next->at });
+        pos = next->to;
+        jumped = true;
+    }
+    if (pos < end)
+        spans.push_back ({ pos, end });
+    if (spans.empty())
+        spans.push_back ({ 0, 0 });
+    return spans;
 }
 
 Song makeRenderSong (const Song& original, const Options& o, std::int64_t tailTicks, std::int64_t& musicTicks, std::int64_t& loopTicks)
@@ -351,27 +531,35 @@ Song makeRenderSong (const Song& original, const Options& o, std::int64_t tailTi
     base.auditionLane = base.auditionComp = -1; // an audition is for listening: an export renders what the song plays (round 177c)
     std::int64_t length = 0;
 
-    if (o.range == Range::selection && hasSelection (song))
+    // round 190pr (Song::exportMarkers): FL's export of the song follows its Start marker and Marker skips
+    const auto spans = o.range == Range::song ? exportSpans (song) : std::vector<std::pair<std::int64_t, std::int64_t>> {};
+    const auto followsMarkers = spans.size() > 1 || (spans.size() == 1 && spans.front().first > 0);
+    if ((o.range == Range::selection && hasSelection (song)) || followsMarkers)
     {
-        const auto from = song.loopStart, to = song.loopEnd;
+        const auto pieces = followsMarkers ? spans : std::vector<std::pair<std::int64_t, std::int64_t>> { { song.loopStart, song.loopEnd } };
         std::vector<Clip> cropped;
         // by start (the same start: the list's order): clips of a pattern cut at `from` all start there, and the one that
         // started last must stay the later one (FL's pattern clip takeover, issue #158)
         auto ordered = song.playlist;
         std::stable_sort (ordered.begin(), ordered.end(), [] (const Clip& a, const Clip& b) { return a.start < b.start; });
 
-        for (auto clip : ordered)
+        std::int64_t at = 0; // where the piece goes in the export
+        for (const auto& [from, to] : pieces)
         {
-            if (clip.end() <= from || clip.start >= to || clip.length <= 0)
-                continue;
-            if (clip.start < from)
-                clip = splitClip (clip, from);
-            if (clip.end() > to)
-                splitClip (clip, to); // keeps the head
-            clip.start -= from;
-            cropped.push_back (clip);
+            for (auto clip : ordered)
+            {
+                if (clip.end() <= from || clip.start >= to || clip.length <= 0)
+                    continue;
+                if (clip.start < from)
+                    clip = splitClip (clip, from);
+                if (clip.end() > to)
+                    splitClip (clip, to); // keeps the head
+                clip.start += at - from;
+                cropped.push_back (clip);
+            }
+            at += to - from;
         }
-
+        const auto from = (std::int64_t) 0, to = at;
         base.playlist = std::move (cropped);
         base.mode = PlayMode::song;
         std::int64_t ignored = 0;
@@ -430,8 +618,9 @@ Song makeRenderSong (const Song& original, const Options& o, std::int64_t tailTi
         for (auto& c : base.channels)
             c.maxPolyphony = 0;
 
-    // FL's export plays the song straight through: marker loops / skips / pauses and the Start / Loop markers act only
-    // while playing live (REA_rodada165f-markers §1.3: FL's renders of every marker action match the plain song)
+    // The rendered song plays straight through: marker loops / skips / pauses and the Start / Loop markers act only while
+    // playing live (REA_rodada165f-markers §1.3). Round 190pr (Song::exportMarkers, FL 2026's /R renders of its demos): the
+    // Start and skip markers already chose the spans above, so they too are plain markers here
     for (auto& a : base.arrangements)
         for (auto& m : a.markers)
             if (m.action == Marker::markerLoop || m.action == Marker::markerSkip || m.action == Marker::markerPause
@@ -551,6 +740,13 @@ Song makeChannelStemSong (const Song& song, int channel, bool dry)
 
 std::string stemFileName (const std::string& base, int number, const std::string& name, const char* ext)
 {
+    // issue #215 (round 190ng): a name made with "$track" / "$insert" (core/ExportNaming.h) is filled per stem
+    if (exportnaming::hasStemWildcard (base))
+    {
+        exportnaming::Context c;
+        c.track = name.empty() ? "Insert " + std::to_string (number) : name;
+        return exportnaming::sanitise (exportnaming::substitute (base, c, 1)) + ext; // (the rest was filled before the file dialog)
+    }
     std::string clean;
     for (auto ch : name)
         clean += std::string ("<>:\"/\\|?*").find (ch) != std::string::npos || (unsigned char) ch < 32 ? '_' : ch;
@@ -672,6 +868,9 @@ StemTap planStemTap (const Song& shared, int track, const std::vector<int>& chan
         return fail ("stand-ins or frozen channels");
     if (shared.mixer[(std::size_t) track].muted)
         return fail ("the insert is muted (its own render plays it)");
+    // round 190my: FL's Current track renders on the mixer's selected track (each render takes it from there)
+    if (std::any_of (shared.mixer.begin(), shared.mixer.end(), [] (const MixerTrack& m) { return m.current && ! m.effects.empty(); }))
+        return fail ("the Current track");
 
     // the stem render takes the Master's automation, events and effects out: its blocks would be cut differently, and
     // what the Master's effects control is not in it
@@ -876,12 +1075,29 @@ Options sectionOptions (Options o)
     o.range = Range::selection;
     o.loops = 1;
     o.sections = false;
+    o.songSections = false;
     return o;
 }
 
 bool exportsSections (const Song& song, const Options& o)
 {
-    return o.sections && o.range == Range::song && ! o.master && ! markerSections (song).empty();
+    return (o.sections || o.songSections) && o.range == Range::song && ! o.master && ! exportSections (song, o).empty();
+}
+
+std::vector<Section> laneSections (const Song& song)
+{
+    std::vector<Section> out;
+    for (const auto& s : song.sections())
+        if (s.length > 0)
+            out.push_back ({ s.name.empty() ? "Section " + std::to_string (out.size() + 1) : s.name, s.start, s.end() });
+    return out;
+}
+
+std::vector<Section> exportSections (const Song& song, const Options& o)
+{
+    if (o.songSections)
+        return laneSections (song);
+    return o.sections ? markerSections (song) : std::vector<Section>();
 }
 
 std::string sectionBaseName (const std::string& base, int number, int count, const std::string& name)
@@ -904,7 +1120,7 @@ int fileCount (const Song& song, const Options& o, const std::vector<int>& onlyT
     if (! exportsSections (song, o))
         return parts (song, o) * perRender;
     int files = 0;
-    for (const auto& section : markerSections (song))
+    for (const auto& section : exportSections (song, o))
         files += parts (makeSectionSong (song, section), sectionOptions (o));
     return files * perRender;
 }
